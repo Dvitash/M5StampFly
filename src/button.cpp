@@ -45,7 +45,10 @@ void task_button_update(void *pvParameters) {
 
 // this function will be called when the button click.
 void Click(void *oneButton) {
-    buzzer_sound(4000, 1000);
+    buzzer_sound(NOTE_D4, 200);
+    buzzer_sound(NOTE_D3, 200);
+    buzzer_sound(NOTE_D5, 200);
+    buzzer_sound(NOTE_D1, 200);
     esp_restart();
 }
 

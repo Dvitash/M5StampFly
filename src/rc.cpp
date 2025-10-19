@@ -27,7 +27,11 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <WebServer.h>
 #include "flight_control.hpp"
+#include <buzzer.h>
+
+WebServer server(80);
 
 // esp_now_peer_info_t slave;
 
@@ -148,13 +152,68 @@ void on_esp_now_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     esp_now_send_status = status;
 }
 
+static uint32_t g_activeFreq = 0;
+
+void startBuzz() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(204);
+
+    uint32_t freq = 1000;
+
+    if (server.hasArg("freq")) {
+        freq = server.arg("freq").toInt();
+        if (freq < 50) freq = 50;
+        if (freq > 10000) freq = 10000;
+
+        tone(freq);
+        g_activeFreq = freq;
+    }
+}
+
+void stopBuzz() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(204);
+
+    if (server.hasArg("freq")) {
+        uint32_t freq = server.arg("freq").toInt();
+        if (freq == g_activeFreq) {
+            g_activeFreq = 0;
+            stopTone();
+        }
+    }
+}
+
+void do_flip() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(204);
+
+    auto_landing();
+}
+
 void rc_init(void) {
     // Initialize Stick list
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
 
     // ESP-NOW初期化
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
+    // WiFi.mode(WIFI_STA);
+    // WiFi.disconnect();
+
+    // WiFi.macAddress((uint8_t *)MyMacAddr);
+    // USBSerial.printf("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
+    //                  MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, 1);
+
+    USBSerial.println("Access Point started!");
+    USBSerial.print("IP address: ");
+    USBSerial.println(WiFi.softAPIP());
 
     WiFi.macAddress((uint8_t *)MyMacAddr);
     USBSerial.printf("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
@@ -186,8 +245,8 @@ void rc_init(void) {
     }
 
     // ESP-NOW再初期化
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
+    // WiFi.mode(WIFI_STA);
+    // WiFi.disconnect();
     if (esp_now_init() == ESP_OK) {
         USBSerial.println("ESPNow Init Success2");
     } else {
@@ -198,6 +257,11 @@ void rc_init(void) {
     // ESP-NOWコールバック登録
     esp_now_register_recv_cb(OnDataRecv);
     USBSerial.println("ESP-NOW Ready.");
+
+    server.on("/buzz/start", startBuzz);
+    server.on("/buzz/stop", stopBuzz);
+    server.on("/flip", do_flip);
+    server.begin();
 }
 
 void send_peer_info(void) {
@@ -252,6 +316,10 @@ uint8_t rc_isconnected(void) {
         status = 0;
     // USBSerial.printf("%d \n\r", Connect_flag);
     return status;
+}
+
+void handleClient() {
+    server.handleClient();
 }
 
 void rc_demo() {

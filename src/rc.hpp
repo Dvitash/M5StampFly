@@ -65,12 +65,16 @@
 #define ELEVATOR_MAX      127
 #define THROTTLE_MAX_JOYC 100
 
+#define WIFI_SSID "ESP32-S3"
+#define WIFI_PASSWORD "password"
+
 void rc_init(void);
 void rc_demo(void);
 void rc_end(void);
 uint8_t rc_isconnected(void);
 uint8_t telemetry_send(uint8_t* data, uint16_t datalen);
 void send_peer_info(void);
+void handleClient(void);
 
 extern volatile float Stick[16];
 extern volatile uint8_t Rc_err_flag;

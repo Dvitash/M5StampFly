@@ -306,6 +306,9 @@ void loop_400Hz(void) {
 
     // LED Drive
     led_drive();
+
+    handleClient();
+
     // if (Interval_time>0.006)USBSerial.printf("%9.6f\n\r", Interval_time);
     // USBSerial.printf("Mode=%d OverG=%d\n\r", Mode, OverG_flag);
     // Begin Mode select
@@ -412,6 +415,8 @@ void loop_400Hz(void) {
 }
 
 void flip(void) {
+    USBSerial.println("Received flip");
+
     float domega;
     float flip_delay;
     uint16_t flip_step;
@@ -423,6 +428,8 @@ void flip(void) {
     if (judge_mode_change() == 1) Mode = AUTO_LANDING_MODE;
     if (rc_isconnected() == 0) Mode = AUTO_LANDING_MODE;
     if (OverG_flag == 1) Mode = PARKING_MODE;
+
+    USBSerial.printf("Mode: %u\n", Mode);
 
     // Flip parameter set
     Flip_time            = 0.4;

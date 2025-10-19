@@ -18,5 +18,7 @@ void setup_pwm_buzzer(void);
 void beep(void);
 void start_tone(void);
 void buzzer_sound(uint32_t frequency, uint32_t duration_ms);
+void tone(uint32_t frequency);
+void stopTone(void);
 
 #endif

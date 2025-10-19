@@ -35,3 +35,13 @@ void start_tone(void) {
     buzzer_sound(NOTE_D3, 200);
     buzzer_sound(NOTE_D4, 200);
 }
+
+void tone(uint32_t frequency) {
+    ledcWriteTone(channel, frequency);
+    ledcWrite(channel, 127);
+}
+
+void stopTone() {
+    ledcWriteTone(channel, 0);
+    digitalWrite(channel, 0);
+}
