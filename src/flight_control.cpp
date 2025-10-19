@@ -239,6 +239,10 @@ void IRAM_ATTR onTimer() {
     Loop_flag = 1;
 }
 
+void request_mode_change(uint8_t mode) {
+    Mode = mode;
+}
+
 // Initialize Multi copter
 void init_copter(void) {
     // Initialize Mode
@@ -1093,4 +1097,11 @@ void motor_stop(void) {
     set_duty_fl(0.0);
     set_duty_rr(0.0);
     set_duty_rl(0.0);
+}
+
+void auto_takeoff_and_hover(float target_altitude) {
+    Alt_ref = target_altitude;
+
+    Mode                  = FLIGHT_MODE;
+    Stick[ALTCONTROLMODE] = AUTO_ALT;
 }

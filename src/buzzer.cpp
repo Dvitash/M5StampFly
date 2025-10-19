@@ -17,7 +17,7 @@ void setup_pwm_buzzer(void) {
 
 void buzzer_sound(uint32_t frequency, uint32_t duration_ms) {
     ledcWriteTone(channel, frequency);
-    ledcWrite(channel, 127);
+    ledcWrite(channel, 255);
 
     vTaskDelay(duration_ms / portTICK_PERIOD_MS);
 
@@ -38,7 +38,7 @@ void start_tone(void) {
 
 void tone(uint32_t frequency) {
     ledcWriteTone(channel, frequency);
-    ledcWrite(channel, 127);
+    ledcWrite(channel, 255);
 }
 
 void stopTone() {

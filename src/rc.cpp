@@ -187,13 +187,28 @@ void stopBuzz() {
     }
 }
 
-void do_flip() {
+void do_hover() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
     server.send(204);
 
-    auto_landing();
+    if (server.hasArg("altitude")) {
+        float altitude = server.arg("altitude").toFloat();
+        auto_takeoff_and_hover(altitude);
+
+        USBSerial.println("Hover received");
+    }
+}
+
+void auto_land() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(204);
+
+    request_mode_change(AUTO_LANDING_MODE);
+    USBSerial.println("Auto landing received");
 }
 
 void rc_init(void) {
@@ -260,7 +275,8 @@ void rc_init(void) {
 
     server.on("/buzz/start", startBuzz);
     server.on("/buzz/stop", stopBuzz);
-    server.on("/flip", do_flip);
+    server.on("/land", auto_land);
+    server.on("/hover", do_hover);
     server.begin();
 }
 
@@ -309,7 +325,7 @@ void rc_end(void) {
 
 uint8_t rc_isconnected(void) {
     bool status;
-    Connect_flag++;
+    // Connect_flag++;
     if (Connect_flag < 40)
         status = 1;
     else

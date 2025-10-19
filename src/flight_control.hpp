@@ -65,8 +65,8 @@
 
 // グローバル関数の宣言
 void init_copter(void);
-void flip(void);
-uint8_t auto_landing(void);
+void request_mode_change(uint8_t mode);
+void auto_takeoff_and_hover(float target_altitude);
 void loop_400Hz(void);
 void set_duty_fr(float duty);
 void set_duty_fl(float duty);
