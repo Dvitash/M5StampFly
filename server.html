@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>ESP32 Virtual Piano</title>
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background: #f4f4f4;
+      text-align: center;
+      padding-top: 50px;
+      user-select: none;
+    }
+
+    h1 {
+      margin-bottom: 10px;
+    }
+
+    .keyboard {
+      position: relative;
+      display: inline-block;
+      margin-top: 30px;
+      perspective: 1000px;
+    }
+
+    /* White keys */
+    .white-key {
+      position: relative;
+      width: 80px;
+      height: 300px;
+      background: white;
+      border: 2px solid #333;
+      border-radius: 0 0 5px 5px;
+      display: inline-block;
+      margin: 0;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+      cursor: pointer;
+      transition: transform 0.08s, background 0.1s;
+    }
+
+    .white-key.active {
+      background: #a4b9ff;
+      transform: translateY(3px);
+    }
+
+    /* Black keys */
+    .black-key {
+      position: absolute;
+      width: 50px;
+      height: 180px;
+      background: #111;
+      border-radius: 0 0 4px 4px;
+      top: 0;
+      z-index: 2;
+      cursor: pointer;
+      box-shadow: 0 3px 5px rgba(0, 0, 0, 0.4);
+      transition: transform 0.08s, background 0.1s;
+    }
+
+    .black-key.active {
+      background: #444cff;
+      transform: translateY(2px);
+    }
+
+    .label {
+      position: absolute;
+      bottom: 8px;
+      width: 100%;
+      text-align: center;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .hotkey {
+      font-size: 12px;
+      color: #777;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>ESP32 Amazing Piano Buzzer Demo</h1>
+
+  <div class="keyboard" id="keyboard"></div>
+
+  <script>
+    const ESP32_IP = "192.168.4.1";
+    const activeKeys = new Set();
+
+    // White and black key definitions with hotkeys
+    const keys = [
+      { note: "C4", freq: 262, type: "white", key: "a" },
+      { note: "C#4", freq: 277, type: "black", key: "w", pos: 60 },
+      { note: "D4", freq: 294, type: "white", key: "s" },
+      { note: "D#4", freq: 311, type: "black", key: "e", pos: 140 },
+      { note: "E4", freq: 330, type: "white", key: "d" },
+      { note: "F4", freq: 349, type: "white", key: "f" },
+      { note: "F#4", freq: 370, type: "black", key: "t", pos: 300 },
+      { note: "G4", freq: 392, type: "white", key: "g" },
+      { note: "G#4", freq: 415, type: "black", key: "y", pos: 380 },
+      { note: "A4", freq: 440, type: "white", key: "h" },
+      { note: "A#4", freq: 466, type: "black", key: "u", pos: 460 },
+      { note: "B4", freq: 494, type: "white", key: "j" },
+      { note: "C5", freq: 523, type: "white", key: "k" }
+    ];
+
+    const keyboardDiv = document.getElementById("keyboard");
+
+    // Draw white keys first
+    keys.filter(k => k.type === "white").forEach(k => {
+      const el = document.createElement("div");
+      el.className = "white-key";
+      el.dataset.note = k.note;
+      el.dataset.key = k.key;
+      el.dataset.freq = k.freq;
+      el.innerHTML = `<div class="label">${k.note}<br><span class="hotkey">[${k.key.toUpperCase()}]</span></div>`;
+      el.addEventListener("mousedown", () => pressKey(k.key, el));
+      el.addEventListener("mouseup", () => releaseKey(k.key, el));
+      el.addEventListener("mouseleave", () => releaseKey(k.key, el));
+      keyboardDiv.appendChild(el);
+    });
+
+    // Then draw black keys (positioned over white)
+    keys.filter(k => k.type === "black").forEach(k => {
+      const el = document.createElement("div");
+      el.className = "black-key";
+      el.style.left = `${k.pos}px`;
+      el.dataset.note = k.note;
+      el.dataset.key = k.key;
+      el.dataset.freq = k.freq;
+      el.innerHTML = `<div class="label" style="color:white;">${k.note}<br><span class="hotkey">[${k.key.toUpperCase()}]</span></div>`;
+      el.addEventListener("mousedown", () => pressKey(k.key, el));
+      el.addEventListener("mouseup", () => releaseKey(k.key, el));
+      el.addEventListener("mouseleave", () => releaseKey(k.key, el));
+      keyboardDiv.appendChild(el);
+    });
+
+    // Keyboard input
+    document.addEventListener("keydown", e => {
+      const key = e.key.toLowerCase();
+      const noteEl = document.querySelector(`[data-key="${key}"]`);
+      if (noteEl && !activeKeys.has(key)) pressKey(key, noteEl);
+    });
+    document.addEventListener("keyup", e => {
+      const key = e.key.toLowerCase();
+      const noteEl = document.querySelector(`[data-key="${key}"]`);
+      if (noteEl) releaseKey(key, noteEl);
+    });
+
+    function pressKey(key, el) {
+      if (!el) return;
+      activeKeys.add(key);
+      el.classList.add("active");
+      const freq = el.dataset.freq;
+      fetch(`http://${ESP32_IP}/buzz/start?freq=${freq}`).catch(console.error);
+    }
+
+    function releaseKey(key, el) {
+      if (!el) return;
+      activeKeys.delete(key);
+      el.classList.remove("active");
+      const freq = el.dataset.freq;
+      fetch(`http://${ESP32_IP}/buzz/stop?freq=${freq}`).catch(console.error);
+    }
+
+  </script>
+
+  </script>
+
+  <div style="margin-top:40px; display:flex; justify-content:center; gap:10px;">
+    <button id="flipButton">Flip</button>
+    <button id="hoverButton">Hover</button>
+    <button id="landButton">Land</button>
+  </div>
+
+  <script>
+    const sendRequest = (endpoint) => {
+      fetch(`http://${ESP32_IP}/${endpoint}`)
+        .catch(err => alert("Error: " + err));
+    };
+
+    document.getElementById("flipButton").addEventListener("click", () => sendRequest("flip"));
+    document.getElementById("hoverButton").addEventListener("click", () => sendRequest("hover?altitude=0.5"));
+    document.getElementById("landButton").addEventListener("click", () => sendRequest("land"));
+  </script>
+</body>
+</html>
+
+
+</body>
+
+</html>
