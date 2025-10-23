@@ -211,6 +211,52 @@ void auto_land() {
     USBSerial.println("Auto landing received");
 }
 
+void handle_movement() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(204);
+
+    float speed;
+    String direction = server.arg("direction");
+
+    if (server.hasArg("speed")) {
+        speed = server.arg("speed").toFloat();
+    } else {
+        speed = 1.0;
+    }
+
+    if (direction == "left") {
+        Stick[AILERON] = -speed;
+    } else if (direction == "right") {
+        Stick[AILERON] = speed;
+    } else if (direction == "forward") {
+        Stick[ELEVATOR] = speed;
+    } else if (direction == "backward") {
+        Stick[ELEVATOR] = -speed;
+    } else {
+        USBSerial.println("Unknown direction");
+        return;
+    }
+    
+    USBSerial.printf("Movement command: %s at speed %.2f\n", direction.c_str(), speed);
+    Stick[CONTROLMODE] = 1.0;
+    ahrs_reset_flag = 0;
+}
+
+void handle_stop() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(204);
+
+    Stick[AILERON] = 0.0;
+    Stick[ELEVATOR] = 0.0;
+    auto_takeoff_and_hover(0.5f);
+
+    USBSerial.println("Stop movement command received");
+}
+
 void rc_init(void) {
     // Initialize Stick list
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
@@ -277,6 +323,8 @@ void rc_init(void) {
     server.on("/buzz/stop", stopBuzz);
     server.on("/land", auto_land);
     server.on("/hover", do_hover);
+    server.on("/move", handle_movement);
+    server.on("/move/stop", handle_stop);
     server.begin();
 }
 

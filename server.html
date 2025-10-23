@@ -166,6 +166,8 @@
 
   </script>
 
+
+
   </script>
 
   <div style="margin-top:40px; display:flex; justify-content:center; gap:10px;">
@@ -185,7 +187,91 @@
     document.getElementById("landButton").addEventListener("click", () => sendRequest("land"));
   </script>
 </body>
+
 </html>
+
+<div style="margin-top:40px; display:flex; justify-content:center; align-items:center; flex-direction:column;">
+  <h3>Drone Direction Control</h3>
+  <div id="arrow-container" style="display:grid; grid-template-columns:80px 80px 80px; gap:8px;">
+    <div></div>
+    <div id="arrow-up" class="arrow-key">↑</div>
+    <div></div>
+    <div id="arrow-left" class="arrow-key">←</div>
+    <div id="arrow-down" class="arrow-key">↓</div>
+    <div id="arrow-right" class="arrow-key">→</div>
+  </div>
+</div>
+
+<style>
+  .arrow-key {
+    width: 80px;
+    height: 80px;
+    line-height: 80px;
+    background: #e0e0e0;
+    border: 2px solid #333;
+    border-radius: 10px;
+    font-size: 32px;
+    font-weight: bold;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+    transition: background 0.1s, transform 0.08s;
+    text-align: center;
+  }
+
+  .arrow-key.active {
+    background: #90b4ff;
+    transform: translateY(3px);
+  }
+
+  .arrow-key:hover {
+    background: #b8c8ff;
+  }
+</style>
+
+<script>
+  const moveMap = {
+    ArrowUp: "move?direction=forward&speed=1",
+    ArrowDown: "move?direction=backward&speed=1",
+    ArrowLeft: "move?direction=left&speed=1",
+    ArrowRight: "move?direction=right&speed=1"
+  };
+
+  document.querySelectorAll('.arrow-key').forEach(el => {
+    el.addEventListener('mousedown', () => handleMove(el.id));
+    el.addEventListener('mouseup', () => releaseMove(el.id));
+    el.addEventListener('mouseleave', () => releaseMove(el.id));
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (moveMap[e.key] && !e.repeat) {
+      e.preventDefault();
+      handleMove(e.key.replace('Arrow', '').toLowerCase());
+    }
+  });
+
+  document.addEventListener('keyup', (e) => {
+    if (moveMap[e.key]) {
+      e.preventDefault();
+      releaseMove(e.key.replace('Arrow', '').toLowerCase());
+    }
+  });
+
+  function handleMove(direction) {
+    const keyId = `arrow-${direction}`;
+    const el = document.getElementById(keyId);
+    if (!el) return;
+    el.classList.add('active');
+    const endpoint = moveMap[`Arrow${direction.charAt(0).toUpperCase() + direction.slice(1)}`];
+    fetch(`http://${ESP32_IP}/${endpoint}`)
+      .catch(err => console.error("Error:", err));
+  }
+
+  function releaseMove(direction) {
+    const el = document.getElementById(`arrow-${direction}`);
+    if (el) el.classList.remove('active');
+  }
+</script>
 
 
 </body>
