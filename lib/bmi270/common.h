@@ -40,6 +40,7 @@ void bmi270_dev_init(void);
 #define PIN_NUM_MOSI (14)
 #define PIN_NUM_CLK (44)
 #define PIN_CS (46)
+#define PIN_CS2 (12)   
 
 esp_err_t spi_init(void);
 

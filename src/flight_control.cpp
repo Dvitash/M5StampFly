@@ -46,7 +46,7 @@
 #include "button.hpp"
 #include "buzzer.h"
 #include <SPI.h>
-#include "Bitcraze_PMW3901.h"
+#include <pmw3901.h>
 
 // モータPWM出力Pinのアサイン
 // Motor PWM Pin
@@ -179,6 +179,9 @@ int8_t BtnA_counter                   = 0;
 uint8_t BtnA_on_flag                  = 0;
 uint8_t BtnA_off_flag                 = 1;
 volatile uint8_t Loop_flag            = 0;
+// Position hold (skyhook) flag: when set, the controller will try to keep
+// the current lateral position using optical flow corrections.
+volatile uint8_t PositionHold_flag   = 0;
 // volatile uint8_t Angle_control_flag = 0;
 uint8_t Stick_return_flag     = 0;
 uint8_t Throttle_control_mode = 0;
@@ -253,8 +256,7 @@ void request_mode_change(uint8_t mode) {
     Mode = mode;
 }
 
-Bitcraze_PMW3901 flow(12);
-SPIClass spi2(HSPI);
+static PMW3901 flow;
 
 // Initialize Multi copter
 void init_copter(void) {
@@ -278,7 +280,8 @@ void init_copter(void) {
     // Initialize PWM
     init_pwm();
 
-    if (!flow.begin(spi2, PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI)) {
+    SPI.begin(PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_CS2);
+    if (!flow.begin()) {
         USBSerial.println("Initialization of the flow sensor failed");
         while (1) {
         }
@@ -286,21 +289,21 @@ void init_copter(void) {
     USBSerial.println("PMW3901 ready");
     delay(1000);
 
-    sensor_init();
-    USBSerial.printf("Finish sensor init!\r\n");
+    // sensor_init();
+    // USBSerial.printf("Finish sensor init!\r\n");
 
     // PID GAIN and etc. Init
-    control_init();
+    // control_init();
 
     // Initilize Radio control
-    rc_init();
+    // rc_init();
 
     // 割り込み設定
     // Initialize intrupt
-    timer = timerBegin(0, 80, true);
-    timerAttachInterrupt(timer, &onTimer, true);
-    timerAlarmWrite(timer, 2500, true);
-    timerAlarmEnable(timer);
+    // timer = timerBegin(0, 80, true);
+    // timerAttachInterrupt(timer, &onTimer, true);
+    // timerAlarmWrite(timer, 2500, true);
+    // timerAlarmEnable(timer);
 
     // init button G0
     init_button();
@@ -314,6 +317,19 @@ void init_copter(void) {
 
 // Main loop
 void loop_400Hz(void) {
+    int16_t deltaX, deltaY = 0;
+    bool gotMotion = false;
+    flow.readMotion(deltaX, deltaY, gotMotion);
+
+    current_x += deltaX;
+    current_y += deltaY;
+
+    USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
+
+    if (1) {
+        return;
+    }
+
     static uint8_t led = 1;
     float sense_time;
     // 割り込みにより400Hzで以降のコードが実行
@@ -373,12 +389,11 @@ void loop_400Hz(void) {
 
         // Get command
         get_command();
+            // Angle Control
+            angle_control();
 
-        // Angle Control
-        angle_control();
-
-        // Rate Control
-        rate_control();
+            // Rate Control
+            rate_control();
 
         // hold_hover_position();
 
@@ -433,13 +448,13 @@ void loop_400Hz(void) {
         rate_control();
     }
 
-    int16_t deltaX, deltaY;
-    flow.readMotionCount(&deltaX, &deltaY);
+    // int16_t deltaX, deltaY;
+    // flow.readMotionCount(&deltaX, &deltaY);
 
-    current_x += deltaX;
-    current_y += deltaY;
+    // current_x += deltaX;
+    // current_y += deltaY;
 
-    USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
+    // USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
 
     //// Telemetry
     // telemetry_fast();
@@ -1138,8 +1153,11 @@ void auto_takeoff_and_hover(float target_altitude) {
     Mode                  = FLIGHT_MODE;
     Stick[ALTCONTROLMODE] = AUTO_ALT;
 
+    // initialize the lateral hold target to the current optical-flow position
     target_x = current_x;
     target_y = current_y;
+    // enable position hold (skyhook)
+    PositionHold_flag = 1;
 }
 
 void hold_hover_position() {
@@ -1148,13 +1166,33 @@ void hold_hover_position() {
 
     float distance_magnitude = sqrt(distance_x * distance_x + distance_y * distance_y);
 
-    Stick[AILERON] *= 0.95;
-    Stick[ELEVATOR] *= 0.95;
+    // small damping to avoid abrupt jumps
+    Stick[AILERON] *= 0.95f;
+    Stick[ELEVATOR] *= 0.95f;
 
-    if (distance_magnitude < MARGIN_OF_ERROR_PIXELS) {  // already there
+    // If user moves sticks significantly, treat as user override and disable position hold
+    if (fabsf(Stick[AILERON]) > 0.2f || fabsf(Stick[ELEVATOR]) > 0.2f) {
+        PositionHold_flag = 0;
         return;
     }
 
-    Stick[AILERON]  = (distance_x > 0 ? -1 : 1) * CORRECTION_MOTOR_SPEED;
-    Stick[ELEVATOR] = (distance_y > 0 ? 1 : -1) * CORRECTION_MOTOR_SPEED;
+    // If within margin, nothing to do
+    if (distance_magnitude < MARGIN_OF_ERROR_PIXELS) {
+        return;
+    }
+
+    // Proportional correction scaled by margin -> convert pixel error to stick correction
+    float k = CORRECTION_MOTOR_SPEED / (float)MARGIN_OF_ERROR_PIXELS;
+    float corr_x = -k * distance_x;  // negative so positive distance_x -> negative aileron (roll)
+    float corr_y = -k * distance_y;  // similarly for elevator
+
+    // clamp corrections
+    if (corr_x > CORRECTION_MOTOR_SPEED) corr_x = CORRECTION_MOTOR_SPEED;
+    if (corr_x < -CORRECTION_MOTOR_SPEED) corr_x = -CORRECTION_MOTOR_SPEED;
+    if (corr_y > CORRECTION_MOTOR_SPEED) corr_y = CORRECTION_MOTOR_SPEED;
+    if (corr_y < -CORRECTION_MOTOR_SPEED) corr_y = -CORRECTION_MOTOR_SPEED;
+
+    // Smoothly blend user stick (tiny residual) and correction
+    Stick[AILERON]  = 0.5f * Stick[AILERON] + 0.5f * corr_x;
+    Stick[ELEVATOR] = 0.5f * Stick[ELEVATOR] + 0.5f * corr_y;
 }
