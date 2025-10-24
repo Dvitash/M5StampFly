@@ -45,6 +45,8 @@
 #include "telemetry.hpp"
 #include "button.hpp"
 #include "buzzer.h"
+#include <SPI.h>
+#include "Bitcraze_PMW3901.h"
 
 // モータPWM出力Pinのアサイン
 // Motor PWM Pin
@@ -120,6 +122,11 @@ volatile float Elapsed_time     = 0.0f;
 volatile float Old_Elapsed_time = 0.0f;
 volatile float Interval_time    = 0.0f;
 volatile uint32_t S_time = 0, E_time = 0, D_time = 0, Dt_time = 0;
+
+volatile float target_x  = 0;
+volatile float target_y  = 0;
+volatile float current_x = 0;
+volatile float current_y = 0;
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -243,6 +250,9 @@ void request_mode_change(uint8_t mode) {
     Mode = mode;
 }
 
+Bitcraze_PMW3901 flow(12);
+SPIClass spi2(HSPI);
+
 // Initialize Multi copter
 void init_copter(void) {
     // Initialize Mode
@@ -284,6 +294,15 @@ void init_copter(void) {
     init_button();
 
     setup_pwm_buzzer();
+
+    Serial.begin(19200);
+
+    if (!flow.begin(spi2, PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI)) {
+        USBSerial.println("Initialization of the flow sensor failed");
+        while (1) {
+        }
+    }
+    USBSerial.println("PMW3901 ready");
 
     USBSerial.printf("Finish StampFly init!\r\n");
     USBSerial.printf("Enjoy Flight!\r\n");
@@ -411,6 +430,12 @@ void loop_400Hz(void) {
     //// Telemetry
     // telemetry_fast();
     telemetry();
+
+    int16_t deltaX, deltaY;
+    flow.readMotionCount(&deltaX, &deltaY);
+
+    current_x += deltaX;
+    current_y += deltaY;
 
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;
