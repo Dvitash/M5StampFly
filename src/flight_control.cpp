@@ -123,10 +123,13 @@ volatile float Old_Elapsed_time = 0.0f;
 volatile float Interval_time    = 0.0f;
 volatile uint32_t S_time = 0, E_time = 0, D_time = 0, Dt_time = 0;
 
-volatile float target_x  = 0;
-volatile float target_y  = 0;
-volatile float current_x = 0;
-volatile float current_y = 0;
+// Positions
+volatile float target_x                = 0;
+volatile float target_y                = 0;
+volatile float current_x               = 0;
+volatile float current_y               = 0;
+constexpr float MARGIN_OF_ERROR_PIXELS = 50;
+constexpr float CORRECTION_MOTOR_SPEED = 0.05f;
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -376,6 +379,9 @@ void loop_400Hz(void) {
 
         // Rate Control
         rate_control();
+
+        // hold_hover_position();
+        
     } else if (Mode == FLIP_MODE) {
         flip();
     } else if (Mode == PARKING_MODE) {
@@ -436,6 +442,8 @@ void loop_400Hz(void) {
 
     current_x += deltaX;
     current_y += deltaY;
+
+    USBSerial.printf("x:%8.1f y:%8.1f dzx:%6d dy:%6d\n", current_x, current_y, deltaX, deltaY);
 
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;
@@ -1129,4 +1137,24 @@ void auto_takeoff_and_hover(float target_altitude) {
 
     Mode                  = FLIGHT_MODE;
     Stick[ALTCONTROLMODE] = AUTO_ALT;
+
+    target_x = current_x;
+    target_y = current_y;
+}
+
+void hold_hover_position() {
+    float distance_x = target_x - current_x;
+    float distance_y = target_y - current_y;
+
+    float distance_magnitude = sqrt(distance_x * distance_x + distance_y * distance_y);
+
+    Stick[AILERON] *= 0.95;
+    Stick[ELEVATOR] *= 0.95;
+
+    if (distance_magnitude < MARGIN_OF_ERROR_PIXELS) {  // already there
+        return;
+    }
+
+    Stick[AILERON]  = (distance_x > 0 ? -1 : 1) * CORRECTION_MOTOR_SPEED;
+    Stick[ELEVATOR] = (distance_y > 0 ? 1 : -1) * CORRECTION_MOTOR_SPEED;
 }

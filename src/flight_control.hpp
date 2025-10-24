@@ -72,6 +72,7 @@ void set_duty_fr(float duty);
 void set_duty_fl(float duty);
 void set_duty_rr(float duty);
 void set_duty_rl(float duty);
+void hold_hover_position(void);
 
 // グローバル変数
 extern volatile uint8_t Mode;
