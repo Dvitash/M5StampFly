@@ -323,8 +323,8 @@ void rc_init(void) {
     server.on("/buzz/stop", stopBuzz);
     server.on("/land", auto_land);
     server.on("/hover", do_hover);
-    server.on("/move", handle_movement);
-    server.on("/move/stop", handle_stop);
+    // server.on("/move", handle_movement);
+    // server.on("/move/stop", handle_stop);
     server.begin();
 }
 

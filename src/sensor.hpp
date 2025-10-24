@@ -44,6 +44,7 @@
 #define PIN_NUM_MOSI (14)
 #define PIN_NUM_CLK  (44)
 #define PIN_CS       (46)
+#define PIN_CS2      (12)
 
 typedef struct {
     spi_host_device_t host;  ///< The SPI host used, set before calling `spi_eeprom_init()`

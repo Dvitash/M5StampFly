@@ -27,7 +27,7 @@
 #define CHIP_ID         0x49  // 01001001
 #define CHIP_ID_INVERSE 0xB6  // 10110110
 
-static constexpr uint32_t PMW_SPI_HZ = 4000000;
+static constexpr uint32_t PMW_SPI_HZ = 2000000;
 
 Bitcraze_PMW3901::Bitcraze_PMW3901(uint8_t cspin) : _cs(cspin), _spi(nullptr) {
 }

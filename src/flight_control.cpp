@@ -277,6 +277,15 @@ void init_copter(void) {
 
     // Initialize PWM
     init_pwm();
+
+    if (!flow.begin(spi2, PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI)) {
+        USBSerial.println("Initialization of the flow sensor failed");
+        while (1) {
+        }
+    }
+    USBSerial.println("PMW3901 ready");
+    delay(1000);
+
     sensor_init();
     USBSerial.printf("Finish sensor init!\r\n");
 
@@ -297,15 +306,6 @@ void init_copter(void) {
     init_button();
 
     setup_pwm_buzzer();
-
-    Serial.begin(19200);
-
-    if (!flow.begin(spi2, PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI)) {
-        USBSerial.println("Initialization of the flow sensor failed");
-        while (1) {
-        }
-    }
-    USBSerial.println("PMW3901 ready");
 
     USBSerial.printf("Finish StampFly init!\r\n");
     USBSerial.printf("Enjoy Flight!\r\n");
@@ -381,7 +381,7 @@ void loop_400Hz(void) {
         rate_control();
 
         // hold_hover_position();
-        
+
     } else if (Mode == FLIP_MODE) {
         flip();
     } else if (Mode == PARKING_MODE) {
@@ -433,17 +433,17 @@ void loop_400Hz(void) {
         rate_control();
     }
 
-    //// Telemetry
-    // telemetry_fast();
-    telemetry();
-
     int16_t deltaX, deltaY;
     flow.readMotionCount(&deltaX, &deltaY);
 
     current_x += deltaX;
     current_y += deltaY;
 
-    USBSerial.printf("x:%8.1f y:%8.1f dzx:%6d dy:%6d\n", current_x, current_y, deltaX, deltaY);
+    USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
+
+    //// Telemetry
+    // telemetry_fast();
+    telemetry();
 
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;
