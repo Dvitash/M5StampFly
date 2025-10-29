@@ -1,279 +1,232 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<meta charset="utf-8">
+<title>Drone Telemetry</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--bg:#0b1020;--fg:#e6e8ef;--mut:#93a1b;--card:#121a34;--ok:#36c;--warn:#c63}
+  *{box-sizing:border-box}body{margin:0;font:14px system-ui;background:var(--bg);color:var(--fg)}
+  header{padding:12px 16px;border-bottom:1px solid #1f2a4d;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  header h1{font:600 16px system-ui;margin:0}
+  .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:12px;padding:12px}
+  .card{background:var(--card);border:1px solid #1f2a4d;border-radius:10px;padding:12px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  button{background:#1e2b55;color:var(--fg);border:1px solid #33457a;border-radius:8px;padding:8px 12px;cursor:pointer}
+  button:hover{filter:brightness(1.1)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 12px}
+  .ok{color:var(--ok)}.bad{color:var(--warn)}
+  canvas{width:100%;height:220px;border-radius:8px;background:#0d1328}
+  .num{font:600 18px}
+  .axis{opacity:.85}
+  .kbd{background:#0d1328;border:1px solid #23305a;border-radius:6px;padding:2px 6px;margin-left:6px}
+  .tiny{font-size:12px;opacity:.9}
+  label{display:inline-flex;align-items:center;gap:6px}
+  input[type="number"]{width:84px;background:#0d1328;border:1px solid #23305a;color:var(--fg);border-radius:6px;padding:4px 6px}
+  .hint{opacity:.75}
+</style>
+<header>
+  <h1>Drone Telemetry</h1>
+  <div id="ip">IP:<span class="kbd" id="host"></span></div>
+  <div>RC link: <span id="rc" class="kbd">—</span></div>
+  <div>t<sub>us</sub>: <span id="tus" class="kbd">0</span></div>
+  <div class="row">
+    <button onclick="hover()">Hover 0.5 m</button>
+    <button onclick="land()">Land</button>
+    <button onclick="buzz(880)">Beep A4</button>
+    <button onclick="buzz(0)">Stop Beep</button>
+  </div>
+</header>
 
-<head>
-  <meta charset="utf-8">
-  <title>ESP32 Virtual Piano</title>
-  <style>
-    body {
-      font-family: "Segoe UI", sans-serif;
-      background: #f4f4f4;
-      text-align: center;
-      padding-top: 50px;
-      user-select: none;
-    }
-
-    h1 {
-      margin-bottom: 10px;
-    }
-
-    .keyboard {
-      position: relative;
-      display: inline-block;
-      margin-top: 30px;
-      perspective: 1000px;
-    }
-
-    /* White keys */
-    .white-key {
-      position: relative;
-      width: 80px;
-      height: 300px;
-      background: white;
-      border: 2px solid #333;
-      border-radius: 0 0 5px 5px;
-      display: inline-block;
-      margin: 0;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
-      cursor: pointer;
-      transition: transform 0.08s, background 0.1s;
-    }
-
-    .white-key.active {
-      background: #a4b9ff;
-      transform: translateY(3px);
-    }
-
-    /* Black keys */
-    .black-key {
-      position: absolute;
-      width: 50px;
-      height: 180px;
-      background: #111;
-      border-radius: 0 0 4px 4px;
-      top: 0;
-      z-index: 2;
-      cursor: pointer;
-      box-shadow: 0 3px 5px rgba(0, 0, 0, 0.4);
-      transition: transform 0.08s, background 0.1s;
-    }
-
-    .black-key.active {
-      background: #444cff;
-      transform: translateY(2px);
-    }
-
-    .label {
-      position: absolute;
-      bottom: 8px;
-      width: 100%;
-      text-align: center;
-      font-weight: bold;
-      font-size: 14px;
-    }
-
-    .hotkey {
-      font-size: 12px;
-      color: #777;
-    }
-  </style>
-</head>
-
-<body>
-  <h1>ESP32 Amazing Piano Buzzer Demo</h1>
-
-  <div class="keyboard" id="keyboard"></div>
-
-  <script>
-    const ESP32_IP = "192.168.4.1";
-    const activeKeys = new Set();
-
-    // White and black key definitions with hotkeys
-    const keys = [
-      { note: "C4", freq: 262, type: "white", key: "a" },
-      { note: "C#4", freq: 277, type: "black", key: "w", pos: 60 },
-      { note: "D4", freq: 294, type: "white", key: "s" },
-      { note: "D#4", freq: 311, type: "black", key: "e", pos: 140 },
-      { note: "E4", freq: 330, type: "white", key: "d" },
-      { note: "F4", freq: 349, type: "white", key: "f" },
-      { note: "F#4", freq: 370, type: "black", key: "t", pos: 300 },
-      { note: "G4", freq: 392, type: "white", key: "g" },
-      { note: "G#4", freq: 415, type: "black", key: "y", pos: 380 },
-      { note: "A4", freq: 440, type: "white", key: "h" },
-      { note: "A#4", freq: 466, type: "black", key: "u", pos: 460 },
-      { note: "B4", freq: 494, type: "white", key: "j" },
-      { note: "C5", freq: 523, type: "white", key: "k" }
-    ];
-
-    const keyboardDiv = document.getElementById("keyboard");
-
-    // Draw white keys first
-    keys.filter(k => k.type === "white").forEach(k => {
-      const el = document.createElement("div");
-      el.className = "white-key";
-      el.dataset.note = k.note;
-      el.dataset.key = k.key;
-      el.dataset.freq = k.freq;
-      el.innerHTML = `<div class="label">${k.note}<br><span class="hotkey">[${k.key.toUpperCase()}]</span></div>`;
-      el.addEventListener("mousedown", () => pressKey(k.key, el));
-      el.addEventListener("mouseup", () => releaseKey(k.key, el));
-      el.addEventListener("mouseleave", () => releaseKey(k.key, el));
-      keyboardDiv.appendChild(el);
-    });
-
-    // Then draw black keys (positioned over white)
-    keys.filter(k => k.type === "black").forEach(k => {
-      const el = document.createElement("div");
-      el.className = "black-key";
-      el.style.left = `${k.pos}px`;
-      el.dataset.note = k.note;
-      el.dataset.key = k.key;
-      el.dataset.freq = k.freq;
-      el.innerHTML = `<div class="label" style="color:white;">${k.note}<br><span class="hotkey">[${k.key.toUpperCase()}]</span></div>`;
-      el.addEventListener("mousedown", () => pressKey(k.key, el));
-      el.addEventListener("mouseup", () => releaseKey(k.key, el));
-      el.addEventListener("mouseleave", () => releaseKey(k.key, el));
-      keyboardDiv.appendChild(el);
-    });
-
-    // Keyboard input
-    document.addEventListener("keydown", e => {
-      const key = e.key.toLowerCase();
-      const noteEl = document.querySelector(`[data-key="${key}"]`);
-      if (noteEl && !activeKeys.has(key)) pressKey(key, noteEl);
-    });
-    document.addEventListener("keyup", e => {
-      const key = e.key.toLowerCase();
-      const noteEl = document.querySelector(`[data-key="${key}"]`);
-      if (noteEl) releaseKey(key, noteEl);
-    });
-
-    function pressKey(key, el) {
-      if (!el) return;
-      activeKeys.add(key);
-      el.classList.add("active");
-      const freq = el.dataset.freq;
-      fetch(`http://${ESP32_IP}/buzz/start?freq=${freq}`).catch(console.error);
-    }
-
-    function releaseKey(key, el) {
-      if (!el) return;
-      activeKeys.delete(key);
-      el.classList.remove("active");
-      const freq = el.dataset.freq;
-      fetch(`http://${ESP32_IP}/buzz/stop?freq=${freq}`).catch(console.error);
-    }
-
-  </script>
-
-
-
-  </script>
-
-  <div style="margin-top:40px; display:flex; justify-content:center; gap:10px;">
-    <button id="flipButton">Flip</button>
-    <button id="hoverButton">Hover</button>
-    <button id="landButton">Land</button>
+<div class="grid">
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h3 style="margin:0">Accelerometer (m/s²)</h3>
+      <div class="tiny hint">mode: <span id="accMode">high-pass</span> • autoscale</div>
+    </div>
+    <div class="row tiny">
+      <label><input type="checkbox" id="accHp" checked>remove gravity (high-pass)</label>
+      <label>cutoff<input type="number" id="accCut" value="0.5" step="0.1" min="0.05" max="5">Hz</label>
+      <label><input type="checkbox" id="accFixed">fixed range ±</label>
+      <input type="number" id="accRange" value="20" step="1" min="2" max="80">
+    </div>
+    <div class="row">
+      <div>X: <span id="ax" class="num axis">0</span></div>
+      <div>Y: <span id="ay" class="num axis">0</span></div>
+      <div>Z: <span id="az" class="num axis">0</span></div>
+      <div>|a|: <span id="amag" class="num">0</span></div>
+      <div class="tiny hint">rms: <span id="arms">0</span></div>
+    </div>
+    <canvas id="acc"></canvas>
   </div>
 
-  <script>
-    const sendRequest = (endpoint) => {
-      fetch(`http://${ESP32_IP}/${endpoint}`)
-        .catch(err => alert("Error: " + err));
-    };
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <h3 style="margin:0">Gyroscope (rad/s)</h3>
+      <div class="tiny hint">mode: <span id="gyrMode">detrended</span> • autoscale</div>
+    </div>
+    <div class="row tiny">
+      <label><input type="checkbox" id="gyrHp" checked>remove bias drift</label>
+      <label>cutoff<input type="number" id="gyrCut" value="0.08" step="0.01" min="0.01" max="1.0">Hz</label>
+      <label><input type="checkbox" id="gyrFixed">fixed range ±</label>
+      <input type="number" id="gyrRange" value="10" step="1" min="1" max="80">
+    </div>
+    <div class="row">
+      <div>X: <span id="gx" class="num axis">0</span></div>
+      <div>Y: <span id="gy" class="num axis">0</span></div>
+      <div>Z: <span id="gz" class="num axis">0</span></div>
+      <div>|ω|: <span id="gmag" class="num">0</span></div>
+      <div class="tiny hint">rms: <span id="grms">0</span></div>
+    </div>
+    <canvas id="gyr"></canvas>
+  </div>
 
-    document.getElementById("flipButton").addEventListener("click", () => sendRequest("flip"));
-    document.getElementById("hoverButton").addEventListener("click", () => sendRequest("hover?altitude=0.5"));
-    document.getElementById("landButton").addEventListener("click", () => sendRequest("land"));
-  </script>
-</body>
+  <div class="card">
+    <h3>Keyboard / UI control</h3>
+    <p>arrow keys send small nudges. hold to repeat. hover and land are above.</p>
+    <div class="row">
+      <button onclick="nudge('forward')">↑ Forward</button>
+      <button onclick="nudge('backward')">↓ Backward</button>
+      <button onclick="nudge('left')">← Left</button>
+      <button onclick="nudge('right')">→ Right</button>
+    </div>
+    <p>stick post demo:</p>
+    <div class="row">
+      <button onclick="sendStick(0,0,0,0)">Zero sticks</button>
+      <button onclick="sendStick(0.3,0,0,0.5)">Cruise</button>
+    </div>
+    <div class="tiny hint">plot fps: <span id="fps">0</span></div>
+  </div>
 
-</html>
-
-<div style="margin-top:40px; display:flex; justify-content:center; align-items:center; flex-direction:column;">
-  <h3>Drone Direction Control</h3>
-  <div id="arrow-container" style="display:grid; grid-template-columns:80px 80px 80px; gap:8px;">
-    <div></div>
-    <div id="arrow-up" class="arrow-key">↑</div>
-    <div></div>
-    <div id="arrow-left" class="arrow-key">←</div>
-    <div id="arrow-down" class="arrow-key">↓</div>
-    <div id="arrow-right" class="arrow-key">→</div>
+  <div class="card">
+    <h3>Log</h3>
+    <pre id="log" style="height:220px;overflow:auto;margin:0;background:#0d1328;border:1px solid #23305a;border-radius:8px;padding:8px"></pre>
   </div>
 </div>
 
-<style>
-  .arrow-key {
-    width: 80px;
-    height: 80px;
-    line-height: 80px;
-    background: #e0e0e0;
-    border: 2px solid #333;
-    border-radius: 10px;
-    font-size: 32px;
-    font-weight: bold;
-    cursor: pointer;
-    user-select: none;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
-    transition: background 0.1s, transform 0.08s;
-    text-align: center;
-  }
-
-  .arrow-key.active {
-    background: #90b4ff;
-    transform: translateY(3px);
-  }
-
-  .arrow-key:hover {
-    background: #b8c8ff;
-  }
-</style>
-
 <script>
-  const moveMap = {
-    ArrowUp: "move?direction=forward&speed=1",
-    ArrowDown: "move?direction=backward&speed=1",
-    ArrowLeft: "move?direction=left&speed=1",
-    ArrowRight: "move?direction=right&speed=1"
-  };
+  // http helpers
+  const host = location.host || "192.168.4.1"; document.getElementById('host').textContent = host || "(set)";
+  const http = (p,opt={}) => fetch(`http://${host}${p}`, opt);
 
-  document.querySelectorAll('.arrow-key').forEach(el => {
-    el.addEventListener('mousedown', () => handleMove(el.id));
-    el.addEventListener('mouseup', () => releaseMove(el.id));
-    el.addEventListener('mouseleave', () => releaseMove(el.id));
-  });
+  // control endpoints
+  function hover(){ http(`/hover?altitude=0.5`).catch(()=>{}); }
+  function land(){ http(`/land`).catch(()=>{}); }
+  function buzz(freq){ if(freq>0) http(`/buzz/start?freq=${freq}`); else http(`/buzz/stop?freq=880`); }
+  function nudge(direction, speed=0.6){ http(`/move?direction=${direction}&speed=${speed}`).catch(()=>{}); }
+  function sendStick(ail,ele,rud,thr){ http(`/stick`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ail,ele,rud,thr})}); }
 
-  document.addEventListener('keydown', (e) => {
-    if (moveMap[e.key] && !e.repeat) {
-      e.preventDefault();
-      handleMove(e.key.replace('Arrow', '').toLowerCase());
+  // arrow key nudges
+  const keyMap = {ArrowUp:'forward', ArrowDown:'backward', ArrowLeft:'left', ArrowRight:'right'};
+  let repeatTimer=null, repeatKey=null;
+  document.addEventListener('keydown', e=>{ if(!keyMap[e.key] || repeatKey===e.key) return; repeatKey=e.key; nudge(keyMap[e.key]); repeatTimer=setInterval(()=>nudge(keyMap[e.key]),120); });
+  document.addEventListener('keyup', e=>{ if(e.key===repeatKey){ clearInterval(repeatTimer); repeatTimer=null; repeatKey=null; } });
+
+  // simple ema for mean/variance
+  function emaStep(state, x, alpha){ const d=x-state.mean; state.mean+=alpha*d; state.var=(1-alpha)*(state.var+alpha*d*d); return state; } // one-liner
+
+  // first order high-pass
+  function highPassStep(buf, x, dt, cutoffHz){ const rc=1/(2*Math.PI*cutoffHz); const a=rc/(rc+dt); const y=a*(buf.prevY + x - buf.prevX); buf.prevX=x; buf.prevY=y; return y; } // one-liner
+
+  // rms tracker
+  function rmsStep(state, x, alpha){ state=emaStep(state,x,alpha); const sigma=Math.sqrt(Math.max(0,state.var)); return {state, rms:sigma}; } // one-liner
+
+  // plot with autoscale and zero line
+  class Plot{
+    constructor(canvas, seriesCount, maxPoints=600, opts={}){ this.c=canvas; this.ctx=canvas.getContext('2d'); this.series=Array.from({length:seriesCount},()=>[]); this.max=maxPoints; this.stats=Array.from({length:seriesCount},()=>({mean:0,var:0})); this.alpha=2/Math.min(maxPoints,200); this.fixed=null; this.minRange=opts.minRange??1; this.maxRange=opts.maxRange??80; } // one-liner
+    setFixed(rangeOrNull){ this.fixed=rangeOrNull; } // one-liner
+    push(vals){ vals.forEach((v,i)=>{ const s=this.series[i]; s.push(v); if(s.length>this.max) s.shift(); this.stats[i]=emaStep(this.stats[i],v,this.alpha); }); } // one-liner
+    draw(){ const rect=this.c.getBoundingClientRect(); const w=Math.max(1,Math.floor(rect.width*devicePixelRatio)), h=Math.max(1,Math.floor(rect.height*devicePixelRatio)); if(this.c.width!==w||this.c.height!==h){this.c.width=w;this.c.height=h;} const ctx=this.ctx; ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); ctx.clearRect(0,0,rect.width,rect.height);
+      let range=this.fixed; if(range==null){ let r=0.001; for(const st of this.stats){ const s=Math.sqrt(Math.max(0,st.var)); r=Math.max(r,3*s); } range=Math.min(this.maxRange,Math.max(this.minRange,r)); }
+      ctx.strokeStyle="#23305a"; ctx.lineWidth=1; for(let y=0;y<=4;y++){ const yy=y*(rect.height/4); ctx.beginPath(); ctx.moveTo(0,yy); ctx.lineTo(rect.width,yy); ctx.stroke(); }
+      const y0=rect.height - ((0-(-range))/(2*range))*rect.height; ctx.beginPath(); ctx.moveTo(0,y0); ctx.lineTo(rect.width,y0); ctx.stroke();
+      const colors=["#68a0ff","#8aff8a","#ff8888","#ffd166"];
+      this.series.forEach((s,si)=>{ if(s.length<2) return; ctx.beginPath(); ctx.lineWidth=1.6; ctx.strokeStyle=colors[si%colors.length]; const min=-range,max=range; const step=rect.width/(this.max-1); s.forEach((v,i)=>{ const x=i*step; const y=rect.height - ((v-min)/(max-min))*rect.height; if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }); ctx.stroke(); });
     }
-  });
-
-  document.addEventListener('keyup', (e) => {
-    if (moveMap[e.key]) {
-      e.preventDefault();
-      releaseMove(e.key.replace('Arrow', '').toLowerCase());
-    }
-  });
-
-  function handleMove(direction) {
-    const keyId = `arrow-${direction}`;
-    const el = document.getElementById(keyId);
-    if (!el) return;
-    el.classList.add('active');
-    const endpoint = moveMap[`Arrow${direction.charAt(0).toUpperCase() + direction.slice(1)}`];
-    fetch(`http://${ESP32_IP}/${endpoint}`)
-      .catch(err => console.error("Error:", err));
   }
 
-  function releaseMove(direction) {
-    const el = document.getElementById(`arrow-${direction}`);
-    if (el) el.classList.remove('active');
+  // elements
+  const el = id => document.getElementById(id);
+  const log = t => { const L=el('log'); L.textContent=(t+"\n"+L.textContent).slice(0,4000); }; // one-liner
+
+  // plots
+  const accPlot = new Plot(el('acc'), 4, 600, {minRange:1,maxRange:80});
+  const gyrPlot = new Plot(el('gyr'), 4, 600, {minRange:0.5,maxRange:80});
+
+  // filters and stats
+  const accHpBuf = [{prevX:0,prevY:0},{prevX:0,prevY:0},{prevX:0,prevY:0}];
+  const gyrHpBuf = [{prevX:0,prevY:0},{prevX:0,prevY:0},{prevX:0,prevY:0}];
+  let accRmsState={mean:0,var:0}, gyrRmsState={mean:0,var:0};
+
+  // polling
+  let lastDraw=0, lastUs=null, lastFpsMark=performance.now(), frames=0;
+  async function poll(){
+    try{
+      const r = await http(`/telemetry`); if(!r.ok) throw 0;
+      const d = await r.json();
+
+      // time calc
+      const now = performance.now();
+      let dt = 0.05;
+      if (typeof d.t_us === 'number'){ el('tus').textContent = d.t_us; if(lastUs!=null){ dt = Math.max(1e-4, (d.t_us - lastUs) * 1e-6); } lastUs = d.t_us; }
+
+      // rc status
+      el('rc').textContent = d.rc_ok ? "OK" : "LOST";
+      el('rc').className = d.rc_ok ? "kbd ok" : "kbd bad";
+
+      // raw values
+      const axr=d.acc[0], ayr=d.acc[1], azr=d.acc[2];
+      const gxr=d.gyro[0], gyr=d.gyro[1], gzr=d.gyro[2];
+
+      // filter controls
+      const accHpOn = el('accHp').checked;
+      const gyrHpOn = el('gyrHp').checked;
+      const accCut = Math.max(0.01, Number(el('accCut').value)||0.5);
+      const gyrCut = Math.max(0.01, Number(el('gyrCut').value)||0.08);
+      el('accMode').textContent = accHpOn ? 'high-pass' : 'raw';
+      el('gyrMode').textContent = gyrHpOn ? 'detrended' : 'raw';
+
+      // apply filters
+      const ax = accHpOn ? highPassStep(accHpBuf[0], axr, dt, accCut) : axr;
+      const ay = accHpOn ? highPassStep(accHpBuf[1], ayr, dt, accCut) : ayr;
+      const az = accHpOn ? highPassStep(accHpBuf[2], azr, dt, accCut) : azr;
+      const gx = gyrHpOn ? highPassStep(gyrHpBuf[0], gxr, dt, gyrCut) : gxr;
+      const gy = gyrHpOn ? highPassStep(gyrHpBuf[1], gyr, dt, gyrCut) : gyr;
+      const gz = gyrHpOn ? highPassStep(gyrHpBuf[2], gzr, dt, gyrCut) : gzr;
+
+      const amag = Math.hypot(ax,ay,az);
+      const gmag = Math.hypot(gx,gy,gz);
+
+      // numbers
+      el('ax').textContent = ax.toFixed(3);
+      el('ay').textContent = ay.toFixed(3);
+      el('az').textContent = az.toFixed(3);
+      el('gx').textContent = gx.toFixed(3);
+      el('gy').textContent = gy.toFixed(3);
+      el('gz').textContent = gz.toFixed(3);
+      el('amag').textContent = amag.toFixed(3);
+      el('gmag').textContent = gmag.toFixed(3);
+
+      // rms readouts
+      const accR = rmsStep(accRmsState, amag, 0.05); accRmsState = accR.state; el('arms').textContent = accR.rms.toFixed(3);
+      const gyrR = rmsStep(gyrRmsState, gmag, 0.05); gyrRmsState = gyrR.state; el('grms').textContent = gyrR.rms.toFixed(3);
+
+      // feed plots
+      accPlot.push([ax,ay,az,amag]);
+      gyrPlot.push([gx,gy,gz,gmag]);
+
+      // ranges
+      accPlot.setFixed(el('accFixed').checked ? Math.max(1, Number(el('accRange').value)||20) : null);
+      gyrPlot.setFixed(el('gyrFixed').checked ? Math.max(0.5, Number(el('gyrRange').value)||10) : null);
+
+      // draw at ~25 fps
+      if (now - lastDraw > 40){ accPlot.draw(); gyrPlot.draw(); lastDraw = now; frames++; }
+
+      // fps
+      if (now - lastFpsMark >= 1000){ el('fps').textContent = frames; frames = 0; lastFpsMark = now; }
+    }catch(e){ /* best effort polling */ }
+    finally{ setTimeout(poll, 50); }
   }
+  poll();
+
+  // connectivity hint
+  http(`/ping`).then(r=>r.text()).then(t=>log("ping: "+t)).catch(()=>log("ping failed"));
 </script>
-
-
-</body>
-
-</html>

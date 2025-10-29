@@ -65,7 +65,17 @@ void imu_init(void) {
 }
 
 void imu_update(void) {
-    bmi2_get_sensor_data(&imu_data, pBmi270);
+    // read bmi270 once and publish converted values into globals
+    uint8_t ret = bmi2_get_sensor_data(&imu_data, pBmi270);
+    if (ret == BMI2_OK) {
+        // convert to g and rad/s to keep one source of truth
+        acc_x  = lsb_to_mps2(imu_data.acc.x, 8.0f, 16) / GRAVITY_EARTH;
+        acc_y  = lsb_to_mps2(imu_data.acc.y, 8.0f, 16) / GRAVITY_EARTH;
+        acc_z  = lsb_to_mps2(imu_data.acc.z, 8.0f, 16) / GRAVITY_EARTH;
+        gyro_x = lsb_to_rps(imu_data.gyr.x, DPS20002RAD, 16);
+        gyro_y = lsb_to_rps(imu_data.gyr.y, DPS20002RAD, 16);
+        gyro_z = lsb_to_rps(imu_data.gyr.z, DPS20002RAD, 16);
+    }
 }
 
 float imu_get_acc_x(void) {

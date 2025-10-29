@@ -181,7 +181,7 @@ uint8_t BtnA_off_flag                 = 1;
 volatile uint8_t Loop_flag            = 0;
 // Position hold (skyhook) flag: when set, the controller will try to keep
 // the current lateral position using optical flow corrections.
-volatile uint8_t PositionHold_flag   = 0;
+volatile uint8_t PositionHold_flag = 0;
 // volatile uint8_t Angle_control_flag = 0;
 uint8_t Stick_return_flag     = 0;
 uint8_t Throttle_control_mode = 0;
@@ -257,6 +257,7 @@ void request_mode_change(uint8_t mode) {
 }
 
 static PMW3901 flow;
+SPIClass spi2(HSPI);
 
 // Initialize Multi copter
 void init_copter(void) {
@@ -274,36 +275,38 @@ void init_copter(void) {
 
     // Initialize Serial communication
     USBSerial.begin(115200);
+
     delay(1500);
     USBSerial.printf("Start StampFly!\r\n");
 
     // Initialize PWM
     init_pwm();
 
-    SPI.begin(PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_CS2);
-    if (!flow.begin()) {
+    spi2.begin(PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_CS2);
+    if (!flow.begin(PIN_CS2, spi2)) {
         USBSerial.println("Initialization of the flow sensor failed");
         while (1) {
         }
     }
+
     USBSerial.println("PMW3901 ready");
     delay(1000);
 
-    // sensor_init();
-    // USBSerial.printf("Finish sensor init!\r\n");
+    sensor_init();
+    USBSerial.printf("Finish sensor init!\r\n");
 
     // PID GAIN and etc. Init
-    // control_init();
+    control_init();
 
     // Initilize Radio control
-    // rc_init();
+    rc_init();
 
     // 割り込み設定
     // Initialize intrupt
-    // timer = timerBegin(0, 80, true);
-    // timerAttachInterrupt(timer, &onTimer, true);
-    // timerAlarmWrite(timer, 2500, true);
-    // timerAlarmEnable(timer);
+    timer = timerBegin(0, 80, true);
+    timerAttachInterrupt(timer, &onTimer, true);
+    timerAlarmWrite(timer, 2500, true);
+    timerAlarmEnable(timer);
 
     // init button G0
     init_button();
@@ -324,11 +327,8 @@ void loop_400Hz(void) {
     current_x += deltaX;
     current_y += deltaY;
 
-    USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
-
-    if (1) {
-        return;
-    }
+    flow.debugStatus();
+    // USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
 
     static uint8_t led = 1;
     float sense_time;
@@ -389,11 +389,11 @@ void loop_400Hz(void) {
 
         // Get command
         get_command();
-            // Angle Control
-            angle_control();
+        // Angle Control
+        angle_control();
 
-            // Rate Control
-            rate_control();
+        // Rate Control
+        rate_control();
 
         // hold_hover_position();
 
@@ -1182,7 +1182,7 @@ void hold_hover_position() {
     }
 
     // Proportional correction scaled by margin -> convert pixel error to stick correction
-    float k = CORRECTION_MOTOR_SPEED / (float)MARGIN_OF_ERROR_PIXELS;
+    float k      = CORRECTION_MOTOR_SPEED / (float)MARGIN_OF_ERROR_PIXELS;
     float corr_x = -k * distance_x;  // negative so positive distance_x -> negative aileron (roll)
     float corr_y = -k * distance_y;  // similarly for elevator
 

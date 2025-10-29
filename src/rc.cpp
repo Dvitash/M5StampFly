@@ -30,6 +30,10 @@
 #include <WebServer.h>
 #include "flight_control.hpp"
 #include <buzzer.h>
+#include "imu.hpp"
+
+extern volatile float acc_x, acc_y, acc_z;
+extern volatile float gyro_x, gyro_y, gyro_z;
 
 WebServer server(80);
 
@@ -154,107 +158,111 @@ void on_esp_now_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 static uint32_t g_activeFreq = 0;
 
-void startBuzz() {
+static void handle_options() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
     server.send(204);
+}
 
-    uint32_t freq = 1000;
-
-    if (server.hasArg("freq")) {
-        freq = server.arg("freq").toInt();
-        if (freq < 50) freq = 50;
-        if (freq > 10000) freq = 10000;
-
-        tone(freq);
-        g_activeFreq = freq;
-    }
+// start/stop buzz
+void startBuzz() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    uint32_t freq = server.hasArg("freq") ? server.arg("freq").toInt() : 1000;
+    if (freq < 50) freq = 50;
+    if (freq > 10000) freq = 10000;
+    tone(freq);
+    g_activeFreq = freq;
+    server.send(200, "text/plain", "OK");
 }
 
 void stopBuzz() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-    server.send(204);
-
     if (server.hasArg("freq")) {
-        uint32_t freq = server.arg("freq").toInt();
-        if (freq == g_activeFreq) {
+        uint32_t f = server.arg("freq").toInt();
+        if (f == g_activeFreq) {
             g_activeFreq = 0;
             stopTone();
         }
     }
+    server.send(200, "text/plain", "OK");
 }
 
 void do_hover() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-    server.send(204);
-
-    if (server.hasArg("altitude")) {
-        float altitude = server.arg("altitude").toFloat();
-        auto_takeoff_and_hover(altitude);
-
-        USBSerial.println("Hover received");
-    }
+    float alt = server.hasArg("altitude") ? server.arg("altitude").toFloat() : 0.5f;
+    auto_takeoff_and_hover(alt);
+    server.send(200, "text/plain", "OK");
 }
 
 void auto_land() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-    server.send(204);
-
     request_mode_change(AUTO_LANDING_MODE);
-    USBSerial.println("Auto landing received");
+    server.send(200, "text/plain", "OK");
 }
 
 void handle_movement() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-    server.send(204);
-
-    float speed;
-    String direction = server.arg("direction");
-
-    if (server.hasArg("speed")) {
-        speed = server.arg("speed").toFloat();
-    } else {
-        speed = 1.0;
-    }
-
-    if (direction == "left") {
+    const String dir  = server.arg("direction");
+    const float speed = server.hasArg("speed") ? server.arg("speed").toFloat() : 1.f;
+    if (dir == "left")
         Stick[AILERON] = -speed;
-    } else if (direction == "right") {
+    else if (dir == "right")
         Stick[AILERON] = speed;
-    } else if (direction == "forward") {
+    else if (dir == "forward")
         Stick[ELEVATOR] = speed;
-    } else if (direction == "backward") {
+    else if (dir == "backward")
         Stick[ELEVATOR] = -speed;
-    } else {
-        USBSerial.println("Unknown direction");
+    else {
+        server.send(400, "text/plain", "bad direction");
         return;
     }
-    
-    USBSerial.printf("Movement command: %s at speed %.2f\n", direction.c_str(), speed);
-    Stick[CONTROLMODE] = 1.0;
-    ahrs_reset_flag = 0;
+    Stick[CONTROLMODE] = 1.f;
+    ahrs_reset_flag    = 0;
+    server.send(200, "text/plain", "OK");
 }
 
 void handle_stop() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-    server.send(204);
-
-    Stick[AILERON] = 0.0;
-    Stick[ELEVATOR] = 0.0;
+    Stick[AILERON]  = 0;
+    Stick[ELEVATOR] = 0;
     auto_takeoff_and_hover(0.5f);
+    server.send(200, "text/plain", "OK");
+}
 
-    USBSerial.println("Stop movement command received");
+void handle_telemetry() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache");
+
+    imu_update();
+
+    String mac = String(MyMacAddr[0], 16) + ":" + String(MyMacAddr[1], 16) + ":" + String(MyMacAddr[2], 16) + ":" +
+                 String(MyMacAddr[3], 16) + ":" + String(MyMacAddr[4], 16) + ":" + String(MyMacAddr[5], 16);
+    String j;
+    j.reserve(256);
+    j += '{';
+    j += "\"t_us\":";
+    j += String((uint32_t)micros());
+    j += ",\"acc\":[";
+    j += String(acc_x, 6);
+    j += ',';
+    j += String(acc_y, 6);
+    j += ',';
+    j += String(acc_z, 6);
+    j += ']';
+    j += ",\"gyro\":[";
+    j += String(gyro_x, 6);
+    j += ',';
+    j += String(gyro_y, 6);
+    j += ',';
+    j += String(gyro_z, 6);
+    j += ']';
+    j += ",\"rc_ok\":";
+    j += rc_isconnected() ? "true" : "false";
+    j += ",\"mac\":\"";
+    j += mac;
+    j += "\"}";
+    server.send(200, "application/json", j);
 }
 
 void rc_init(void) {
@@ -319,10 +327,21 @@ void rc_init(void) {
     esp_now_register_recv_cb(OnDataRecv);
     USBSerial.println("ESP-NOW Ready.");
 
-    server.on("/buzz/start", startBuzz);
-    server.on("/buzz/stop", stopBuzz);
-    server.on("/land", auto_land);
-    server.on("/hover", do_hover);
+    server.on("/buzz/start", HTTP_GET, startBuzz);
+    server.on("/buzz/stop", HTTP_GET, stopBuzz);
+    server.on("/land", HTTP_GET, auto_land);
+    server.on("/hover", HTTP_GET, do_hover);
+    server.on("/move", HTTP_GET, handle_movement);
+    server.on("/move/stop", HTTP_GET, handle_stop);
+    server.on("/telemetry", HTTP_GET, handle_telemetry);
+
+    server.on("/buzz/start", HTTP_OPTIONS, handle_options);
+    server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
+    server.on("/land", HTTP_OPTIONS, handle_options);
+    server.on("/hover", HTTP_OPTIONS, handle_options);
+    server.on("/move", HTTP_OPTIONS, handle_options);
+    server.on("/move/stop", HTTP_OPTIONS, handle_options);
+
     // server.on("/move", handle_movement);
     // server.on("/move/stop", handle_stop);
     server.begin();
