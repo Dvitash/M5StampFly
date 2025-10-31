@@ -1,27 +1,115 @@
-<!doctype html>
-<meta charset="utf-8">
+<!DOCTYPE html>
+<meta charset="utf-8" />
 <title>Drone Telemetry</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-  :root{--bg:#0b1020;--fg:#e6e8ef;--mut:#93a1b;--card:#121a34;--ok:#36c;--warn:#c63}
-  *{box-sizing:border-box}body{margin:0;font:14px system-ui;background:var(--bg);color:var(--fg)}
-  header{padding:12px 16px;border-bottom:1px solid #1f2a4d;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-  header h1{font:600 16px system-ui;margin:0}
-  .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:12px;padding:12px}
-  .card{background:var(--card);border:1px solid #1f2a4d;border-radius:10px;padding:12px}
-  .row{display:flex;gap:12px;flex-wrap:wrap}
-  button{background:#1e2b55;color:var(--fg);border:1px solid #33457a;border-radius:8px;padding:8px 12px;cursor:pointer}
-  button:hover{filter:brightness(1.1)}
-  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 12px}
-  .ok{color:var(--ok)}.bad{color:var(--warn)}
-  canvas{width:100%;height:220px;border-radius:8px;background:#0d1328}
-  .num{font:600 18px}
-  .axis{opacity:.85}
-  .kbd{background:#0d1328;border:1px solid #23305a;border-radius:6px;padding:2px 6px;margin-left:6px}
-  .tiny{font-size:12px;opacity:.9}
-  label{display:inline-flex;align-items:center;gap:6px}
-  input[type="number"]{width:84px;background:#0d1328;border:1px solid #23305a;color:var(--fg);border-radius:6px;padding:4px 6px}
-  .hint{opacity:.75}
+  :root {
+    --bg: #0b1020;
+    --fg: #e6e8ef;
+    --mut: #93a1b;
+    --card: #121a34;
+    --ok: #36c;
+    --warn: #c63;
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    font: 14px system-ui;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  header {
+    padding: 12px 16px;
+    border-bottom: 1px solid #1f2a4d;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font: 600 16px system-ui;
+    margin: 0;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 12px;
+    padding: 12px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid #1f2a4d;
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  button {
+    background: #1e2b55;
+    color: var(--fg);
+    border: 1px solid #33457a;
+    border-radius: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+  button:hover {
+    filter: brightness(1.1);
+  }
+  .kv {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 12px;
+  }
+  .ok {
+    color: var(--ok);
+  }
+  .bad {
+    color: var(--warn);
+  }
+  canvas {
+    width: 100%;
+    height: 220px;
+    border-radius: 8px;
+    background: #0d1328;
+  }
+  .num {
+    font: 600 18px;
+  }
+  .axis {
+    opacity: 0.85;
+  }
+  .kbd {
+    background: #0d1328;
+    border: 1px solid #23305a;
+    border-radius: 6px;
+    padding: 2px 6px;
+    margin-left: 6px;
+  }
+  .tiny {
+    font-size: 12px;
+    opacity: 0.9;
+  }
+  label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  input[type="number"] {
+    width: 84px;
+    background: #0d1328;
+    border: 1px solid #23305a;
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 4px 6px;
+  }
+  .hint {
+    opacity: 0.75;
+  }
 </style>
 <header>
   <h1>Drone Telemetry</h1>
@@ -38,15 +126,15 @@
 
 <div class="grid">
   <div class="card">
-    <div class="row" style="justify-content:space-between;align-items:baseline">
-      <h3 style="margin:0">Accelerometer (m/s²)</h3>
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Accelerometer (m/s²)</h3>
       <div class="tiny hint">mode: <span id="accMode">high-pass</span> • autoscale</div>
     </div>
     <div class="row tiny">
-      <label><input type="checkbox" id="accHp" checked>remove gravity (high-pass)</label>
-      <label>cutoff<input type="number" id="accCut" value="0.5" step="0.1" min="0.05" max="5">Hz</label>
-      <label><input type="checkbox" id="accFixed">fixed range ±</label>
-      <input type="number" id="accRange" value="20" step="1" min="2" max="80">
+      <label><input type="checkbox" id="accHp" checked />remove gravity (high-pass)</label>
+      <label>cutoff<input type="number" id="accCut" value="0.5" step="0.1" min="0.05" max="5" />Hz</label>
+      <label><input type="checkbox" id="accFixed" />fixed range ±</label>
+      <input type="number" id="accRange" value="20" step="1" min="2" max="80" />
     </div>
     <div class="row">
       <div>X: <span id="ax" class="num axis">0</span></div>
@@ -59,15 +147,15 @@
   </div>
 
   <div class="card">
-    <div class="row" style="justify-content:space-between;align-items:baseline">
-      <h3 style="margin:0">Gyroscope (rad/s)</h3>
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Gyroscope (rad/s)</h3>
       <div class="tiny hint">mode: <span id="gyrMode">detrended</span> • autoscale</div>
     </div>
     <div class="row tiny">
-      <label><input type="checkbox" id="gyrHp" checked>remove bias drift</label>
-      <label>cutoff<input type="number" id="gyrCut" value="0.08" step="0.01" min="0.01" max="1.0">Hz</label>
-      <label><input type="checkbox" id="gyrFixed">fixed range ±</label>
-      <input type="number" id="gyrRange" value="10" step="1" min="1" max="80">
+      <label><input type="checkbox" id="gyrHp" checked />remove bias drift</label>
+      <label>cutoff<input type="number" id="gyrCut" value="0.08" step="0.01" min="0.01" max="1.0" />Hz</label>
+      <label><input type="checkbox" id="gyrFixed" />fixed range ±</label>
+      <input type="number" id="gyrRange" value="10" step="1" min="1" max="80" />
     </div>
     <div class="row">
       <div>X: <span id="gx" class="num axis">0</span></div>
@@ -98,91 +186,222 @@
 
   <div class="card">
     <h3>Log</h3>
-    <pre id="log" style="height:220px;overflow:auto;margin:0;background:#0d1328;border:1px solid #23305a;border-radius:8px;padding:8px"></pre>
+    <input type="text" id="logSearch" placeholder="Search logs..." style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
+    <pre id="log" style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
   </div>
 </div>
 
 <script>
   // http helpers
-  const host = location.host || "192.168.4.1"; document.getElementById('host').textContent = host || "(set)";
-  const http = (p,opt={}) => fetch(`http://${host}${p}`, opt);
+  const host = location.host || "192.168.4.1";
+  document.getElementById("host").textContent = host || "(set)";
+  const http = (p, opt = {}) => fetch(`http://${host}${p}`, opt);
 
   // control endpoints
-  function hover(){ http(`/hover?altitude=0.5`).catch(()=>{}); }
-  function land(){ http(`/land`).catch(()=>{}); }
-  function buzz(freq){ if(freq>0) http(`/buzz/start?freq=${freq}`); else http(`/buzz/stop?freq=880`); }
-  function nudge(direction, speed=0.6){ http(`/move?direction=${direction}&speed=${speed}`).catch(()=>{}); }
-  function sendStick(ail,ele,rud,thr){ http(`/stick`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ail,ele,rud,thr})}); }
+  function hover() {
+    http(`/hover?altitude=0.5`).catch(() => {});
+  }
+  function land() {
+    http(`/land`).catch(() => {});
+  }
+  function buzz(freq) {
+    if (freq > 0) http(`/buzz/start?freq=${freq}`);
+    else http(`/buzz/stop?freq=880`);
+  }
+  function nudge(direction, speed = 0.6) {
+    http(`/move?direction=${direction}&speed=${speed}`).catch(() => {});
+  }
+  function sendStick(ail, ele, rud, thr) {
+    http(`/stick`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ail, ele, rud, thr }) });
+  }
 
   // arrow key nudges
-  const keyMap = {ArrowUp:'forward', ArrowDown:'backward', ArrowLeft:'left', ArrowRight:'right'};
-  let repeatTimer=null, repeatKey=null;
-  document.addEventListener('keydown', e=>{ if(!keyMap[e.key] || repeatKey===e.key) return; repeatKey=e.key; nudge(keyMap[e.key]); repeatTimer=setInterval(()=>nudge(keyMap[e.key]),120); });
-  document.addEventListener('keyup', e=>{ if(e.key===repeatKey){ clearInterval(repeatTimer); repeatTimer=null; repeatKey=null; } });
+  const keyMap = { ArrowUp: "forward", ArrowDown: "backward", ArrowLeft: "left", ArrowRight: "right" };
+  let repeatTimer = null,
+    repeatKey = null;
+  document.addEventListener("keydown", (e) => {
+    if (!keyMap[e.key] || repeatKey === e.key) return;
+    repeatKey = e.key;
+    nudge(keyMap[e.key]);
+    repeatTimer = setInterval(() => nudge(keyMap[e.key]), 120);
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key === repeatKey) {
+      clearInterval(repeatTimer);
+      repeatTimer = null;
+      repeatKey = null;
+    }
+  });
 
   // simple ema for mean/variance
-  function emaStep(state, x, alpha){ const d=x-state.mean; state.mean+=alpha*d; state.var=(1-alpha)*(state.var+alpha*d*d); return state; } // one-liner
+  function emaStep(state, x, alpha) {
+    const d = x - state.mean;
+    state.mean += alpha * d;
+    state.var = (1 - alpha) * (state.var + alpha * d * d);
+    return state;
+  } // one-liner
 
   // first order high-pass
-  function highPassStep(buf, x, dt, cutoffHz){ const rc=1/(2*Math.PI*cutoffHz); const a=rc/(rc+dt); const y=a*(buf.prevY + x - buf.prevX); buf.prevX=x; buf.prevY=y; return y; } // one-liner
+  function highPassStep(buf, x, dt, cutoffHz) {
+    const rc = 1 / (2 * Math.PI * cutoffHz);
+    const a = rc / (rc + dt);
+    const y = a * (buf.prevY + x - buf.prevX);
+    buf.prevX = x;
+    buf.prevY = y;
+    return y;
+  } // one-liner
 
   // rms tracker
-  function rmsStep(state, x, alpha){ state=emaStep(state,x,alpha); const sigma=Math.sqrt(Math.max(0,state.var)); return {state, rms:sigma}; } // one-liner
+  function rmsStep(state, x, alpha) {
+    state = emaStep(state, x, alpha);
+    const sigma = Math.sqrt(Math.max(0, state.var));
+    return { state, rms: sigma };
+  } // one-liner
 
   // plot with autoscale and zero line
-  class Plot{
-    constructor(canvas, seriesCount, maxPoints=600, opts={}){ this.c=canvas; this.ctx=canvas.getContext('2d'); this.series=Array.from({length:seriesCount},()=>[]); this.max=maxPoints; this.stats=Array.from({length:seriesCount},()=>({mean:0,var:0})); this.alpha=2/Math.min(maxPoints,200); this.fixed=null; this.minRange=opts.minRange??1; this.maxRange=opts.maxRange??80; } // one-liner
-    setFixed(rangeOrNull){ this.fixed=rangeOrNull; } // one-liner
-    push(vals){ vals.forEach((v,i)=>{ const s=this.series[i]; s.push(v); if(s.length>this.max) s.shift(); this.stats[i]=emaStep(this.stats[i],v,this.alpha); }); } // one-liner
-    draw(){ const rect=this.c.getBoundingClientRect(); const w=Math.max(1,Math.floor(rect.width*devicePixelRatio)), h=Math.max(1,Math.floor(rect.height*devicePixelRatio)); if(this.c.width!==w||this.c.height!==h){this.c.width=w;this.c.height=h;} const ctx=this.ctx; ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); ctx.clearRect(0,0,rect.width,rect.height);
-      let range=this.fixed; if(range==null){ let r=0.001; for(const st of this.stats){ const s=Math.sqrt(Math.max(0,st.var)); r=Math.max(r,3*s); } range=Math.min(this.maxRange,Math.max(this.minRange,r)); }
-      ctx.strokeStyle="#23305a"; ctx.lineWidth=1; for(let y=0;y<=4;y++){ const yy=y*(rect.height/4); ctx.beginPath(); ctx.moveTo(0,yy); ctx.lineTo(rect.width,yy); ctx.stroke(); }
-      const y0=rect.height - ((0-(-range))/(2*range))*rect.height; ctx.beginPath(); ctx.moveTo(0,y0); ctx.lineTo(rect.width,y0); ctx.stroke();
-      const colors=["#68a0ff","#8aff8a","#ff8888","#ffd166"];
-      this.series.forEach((s,si)=>{ if(s.length<2) return; ctx.beginPath(); ctx.lineWidth=1.6; ctx.strokeStyle=colors[si%colors.length]; const min=-range,max=range; const step=rect.width/(this.max-1); s.forEach((v,i)=>{ const x=i*step; const y=rect.height - ((v-min)/(max-min))*rect.height; if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }); ctx.stroke(); });
+  class Plot {
+    constructor(canvas, seriesCount, maxPoints = 600, opts = {}) {
+      this.c = canvas;
+      this.ctx = canvas.getContext("2d");
+      this.series = Array.from({ length: seriesCount }, () => []);
+      this.max = maxPoints;
+      this.stats = Array.from({ length: seriesCount }, () => ({ mean: 0, var: 0 }));
+      this.alpha = 2 / Math.min(maxPoints, 200);
+      this.fixed = null;
+      this.minRange = opts.minRange ?? 1;
+      this.maxRange = opts.maxRange ?? 80;
+    } // one-liner
+    setFixed(rangeOrNull) {
+      this.fixed = rangeOrNull;
+    } // one-liner
+    push(vals) {
+      vals.forEach((v, i) => {
+        const s = this.series[i];
+        s.push(v);
+        if (s.length > this.max) s.shift();
+        this.stats[i] = emaStep(this.stats[i], v, this.alpha);
+      });
+    } // one-liner
+    draw() {
+      const rect = this.c.getBoundingClientRect();
+      const w = Math.max(1, Math.floor(rect.width * devicePixelRatio)),
+        h = Math.max(1, Math.floor(rect.height * devicePixelRatio));
+      if (this.c.width !== w || this.c.height !== h) {
+        this.c.width = w;
+        this.c.height = h;
+      }
+      const ctx = this.ctx;
+      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      let range = this.fixed;
+      if (range == null) {
+        let r = 0.001;
+        for (const st of this.stats) {
+          const s = Math.sqrt(Math.max(0, st.var));
+          r = Math.max(r, 3 * s);
+        }
+        range = Math.min(this.maxRange, Math.max(this.minRange, r));
+      }
+      ctx.strokeStyle = "#23305a";
+      ctx.lineWidth = 1;
+      for (let y = 0; y <= 4; y++) {
+        const yy = y * (rect.height / 4);
+        ctx.beginPath();
+        ctx.moveTo(0, yy);
+        ctx.lineTo(rect.width, yy);
+        ctx.stroke();
+      }
+      const y0 = rect.height - ((0 - -range) / (2 * range)) * rect.height;
+      ctx.beginPath();
+      ctx.moveTo(0, y0);
+      ctx.lineTo(rect.width, y0);
+      ctx.stroke();
+      const colors = ["#68a0ff", "#8aff8a", "#ff8888", "#ffd166"];
+      this.series.forEach((s, si) => {
+        if (s.length < 2) return;
+        ctx.beginPath();
+        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = colors[si % colors.length];
+        const min = -range,
+          max = range;
+        const step = rect.width / (this.max - 1);
+        s.forEach((v, i) => {
+          const x = i * step;
+          const y = rect.height - ((v - min) / (max - min)) * rect.height;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
     }
   }
 
   // elements
-  const el = id => document.getElementById(id);
-  const log = t => { const L=el('log'); L.textContent=(t+"\n"+L.textContent).slice(0,4000); }; // one-liner
+  const el = (id) => document.getElementById(id);
+  const log = (t) => {
+    const L = el("log");
+    L.textContent = (t + "\n" + L.textContent).slice(0, 4000);
+  }; // one-liner
 
   // plots
-  const accPlot = new Plot(el('acc'), 4, 600, {minRange:1,maxRange:80});
-  const gyrPlot = new Plot(el('gyr'), 4, 600, {minRange:0.5,maxRange:80});
+  const accPlot = new Plot(el("acc"), 4, 600, { minRange: 1, maxRange: 80 });
+  const gyrPlot = new Plot(el("gyr"), 4, 600, { minRange: 0.5, maxRange: 80 });
 
   // filters and stats
-  const accHpBuf = [{prevX:0,prevY:0},{prevX:0,prevY:0},{prevX:0,prevY:0}];
-  const gyrHpBuf = [{prevX:0,prevY:0},{prevX:0,prevY:0},{prevX:0,prevY:0}];
-  let accRmsState={mean:0,var:0}, gyrRmsState={mean:0,var:0};
+  const accHpBuf = [
+    { prevX: 0, prevY: 0 },
+    { prevX: 0, prevY: 0 },
+    { prevX: 0, prevY: 0 },
+  ];
+  const gyrHpBuf = [
+    { prevX: 0, prevY: 0 },
+    { prevX: 0, prevY: 0 },
+    { prevX: 0, prevY: 0 },
+  ];
+  let accRmsState = { mean: 0, var: 0 },
+    gyrRmsState = { mean: 0, var: 0 };
 
   // polling
-  let lastDraw=0, lastUs=null, lastFpsMark=performance.now(), frames=0;
-  async function poll(){
-    try{
-      const r = await http(`/telemetry`); if(!r.ok) throw 0;
+  let lastDraw = 0,
+    lastUs = null,
+    lastFpsMark = performance.now(),
+    frames = 0;
+  async function poll() {
+    try {
+      const r = await http(`/telemetry`);
+      if (!r.ok) throw 0;
       const d = await r.json();
 
       // time calc
       const now = performance.now();
       let dt = 0.05;
-      if (typeof d.t_us === 'number'){ el('tus').textContent = d.t_us; if(lastUs!=null){ dt = Math.max(1e-4, (d.t_us - lastUs) * 1e-6); } lastUs = d.t_us; }
+      if (typeof d.t_us === "number") {
+        el("tus").textContent = d.t_us;
+        if (lastUs != null) {
+          dt = Math.max(1e-4, (d.t_us - lastUs) * 1e-6);
+        }
+        lastUs = d.t_us;
+      }
 
       // rc status
-      el('rc').textContent = d.rc_ok ? "OK" : "LOST";
-      el('rc').className = d.rc_ok ? "kbd ok" : "kbd bad";
+      el("rc").textContent = d.rc_ok ? "OK" : "LOST";
+      el("rc").className = d.rc_ok ? "kbd ok" : "kbd bad";
 
       // raw values
-      const axr=d.acc[0], ayr=d.acc[1], azr=d.acc[2];
-      const gxr=d.gyro[0], gyr=d.gyro[1], gzr=d.gyro[2];
+      const axr = d.acc[0],
+        ayr = d.acc[1],
+        azr = d.acc[2];
+      const gxr = d.gyro[0],
+        gyr = d.gyro[1],
+        gzr = d.gyro[2];
 
       // filter controls
-      const accHpOn = el('accHp').checked;
-      const gyrHpOn = el('gyrHp').checked;
-      const accCut = Math.max(0.01, Number(el('accCut').value)||0.5);
-      const gyrCut = Math.max(0.01, Number(el('gyrCut').value)||0.08);
-      el('accMode').textContent = accHpOn ? 'high-pass' : 'raw';
-      el('gyrMode').textContent = gyrHpOn ? 'detrended' : 'raw';
+      const accHpOn = el("accHp").checked;
+      const gyrHpOn = el("gyrHp").checked;
+      const accCut = Math.max(0.01, Number(el("accCut").value) || 0.5);
+      const gyrCut = Math.max(0.01, Number(el("gyrCut").value) || 0.08);
+      el("accMode").textContent = accHpOn ? "high-pass" : "raw";
+      el("gyrMode").textContent = gyrHpOn ? "detrended" : "raw";
 
       // apply filters
       const ax = accHpOn ? highPassStep(accHpBuf[0], axr, dt, accCut) : axr;
@@ -192,41 +411,105 @@
       const gy = gyrHpOn ? highPassStep(gyrHpBuf[1], gyr, dt, gyrCut) : gyr;
       const gz = gyrHpOn ? highPassStep(gyrHpBuf[2], gzr, dt, gyrCut) : gzr;
 
-      const amag = Math.hypot(ax,ay,az);
-      const gmag = Math.hypot(gx,gy,gz);
+      const amag = Math.hypot(ax, ay, az);
+      const gmag = Math.hypot(gx, gy, gz);
 
       // numbers
-      el('ax').textContent = ax.toFixed(3);
-      el('ay').textContent = ay.toFixed(3);
-      el('az').textContent = az.toFixed(3);
-      el('gx').textContent = gx.toFixed(3);
-      el('gy').textContent = gy.toFixed(3);
-      el('gz').textContent = gz.toFixed(3);
-      el('amag').textContent = amag.toFixed(3);
-      el('gmag').textContent = gmag.toFixed(3);
+      el("ax").textContent = ax.toFixed(3);
+      el("ay").textContent = ay.toFixed(3);
+      el("az").textContent = az.toFixed(3);
+      el("gx").textContent = gx.toFixed(3);
+      el("gy").textContent = gy.toFixed(3);
+      el("gz").textContent = gz.toFixed(3);
+      el("amag").textContent = amag.toFixed(3);
+      el("gmag").textContent = gmag.toFixed(3);
 
       // rms readouts
-      const accR = rmsStep(accRmsState, amag, 0.05); accRmsState = accR.state; el('arms').textContent = accR.rms.toFixed(3);
-      const gyrR = rmsStep(gyrRmsState, gmag, 0.05); gyrRmsState = gyrR.state; el('grms').textContent = gyrR.rms.toFixed(3);
+      const accR = rmsStep(accRmsState, amag, 0.05);
+      accRmsState = accR.state;
+      el("arms").textContent = accR.rms.toFixed(3);
+      const gyrR = rmsStep(gyrRmsState, gmag, 0.05);
+      gyrRmsState = gyrR.state;
+      el("grms").textContent = gyrR.rms.toFixed(3);
 
       // feed plots
-      accPlot.push([ax,ay,az,amag]);
-      gyrPlot.push([gx,gy,gz,gmag]);
+      accPlot.push([ax, ay, az, amag]);
+      gyrPlot.push([gx, gy, gz, gmag]);
 
       // ranges
-      accPlot.setFixed(el('accFixed').checked ? Math.max(1, Number(el('accRange').value)||20) : null);
-      gyrPlot.setFixed(el('gyrFixed').checked ? Math.max(0.5, Number(el('gyrRange').value)||10) : null);
+      accPlot.setFixed(el("accFixed").checked ? Math.max(1, Number(el("accRange").value) || 20) : null);
+      gyrPlot.setFixed(el("gyrFixed").checked ? Math.max(0.5, Number(el("gyrRange").value) || 10) : null);
 
       // draw at ~25 fps
-      if (now - lastDraw > 40){ accPlot.draw(); gyrPlot.draw(); lastDraw = now; frames++; }
+      if (now - lastDraw > 40) {
+        accPlot.draw();
+        gyrPlot.draw();
+        lastDraw = now;
+        frames++;
+      }
 
       // fps
-      if (now - lastFpsMark >= 1000){ el('fps').textContent = frames; frames = 0; lastFpsMark = now; }
-    }catch(e){ /* best effort polling */ }
-    finally{ setTimeout(poll, 50); }
+      if (now - lastFpsMark >= 1000) {
+        el("fps").textContent = frames;
+        frames = 0;
+        lastFpsMark = now;
+      }
+    } catch (e) {
+      /* best effort polling */
+    } finally {
+      setTimeout(poll, 50);
+    }
   }
   poll();
 
   // connectivity hint
-  http(`/ping`).then(r=>r.text()).then(t=>log("ping: "+t)).catch(()=>log("ping failed"));
+  http(`/ping`)
+    .then((r) => r.text())
+    .then((t) => log("ping: " + t))
+    .catch(() => log("ping failed"));
+
+  // log polling
+  let lastLogId = 0;
+  let allLogs = [];
+  function renderLogs() {
+    const L = el("log");
+    const searchTerm = el("logSearch").value.toLowerCase().trim();
+    let displayText = "";
+    if (searchTerm === "") {
+      displayText = allLogs.join("");
+    } else {
+      allLogs.forEach((line) => {
+        if (line.toLowerCase().includes(searchTerm)) {
+          displayText += line;
+        }
+      });
+    }
+    L.textContent = displayText.slice(0, 4000);
+    L.scrollTop = L.scrollHeight;
+  }
+  async function pollLogs() {
+    try {
+      const r = await http(`/logs?last_id=${lastLogId}`);
+      if (!r.ok) throw 0;
+      const d = await r.json();
+      if (d.logs && d.logs.length > 0) {
+        d.logs.forEach((entry) => {
+          const ts = entry.ts / 1000;
+          const mins = Math.floor(ts / 60);
+          const secs = (ts % 60).toFixed(1);
+          const line = `[${mins}:${secs.padStart(4, "0")}] ${entry.msg}\n`;
+          allLogs.unshift(line);
+          lastLogId = Math.max(lastLogId, entry.id);
+          newLogsAdded = true;
+        });
+        if (allLogs.length > 2000) allLogs = allLogs.slice(0, 2000);
+        renderLogs();
+      }
+    } catch (e) {
+      /* best effort */
+    }
+    setTimeout(pollLogs, (1 / 400) * 1000);
+  }
+  el("logSearch").addEventListener("input", renderLogs);
+  pollLogs();
 </script>

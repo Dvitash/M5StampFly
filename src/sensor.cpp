@@ -27,6 +27,7 @@
 #include "imu.hpp"
 #include "tof.hpp"
 #include "flight_control.hpp"
+#include "serial_logger.hpp"
 
 Madgwick Drone_ahrs;
 Alt_kalman EstimatedAltitude;
@@ -79,24 +80,24 @@ volatile uint8_t Under_voltage_flag = 0;
 // volatile uint16_t Range=1000;
 
 uint8_t scan_i2c() {
-    USBSerial.println("I2C scanner. Scanning ...");
+    serial_logger_usb_println("I2C scanner. Scanning ...");
     delay(50);
     byte count = 0;
     for (uint8_t i = 1; i < 127; i++) {
         Wire1.beginTransmission(i);        // Begin I2C transmission Address (i)
         if (Wire1.endTransmission() == 0)  // Receive 0 = success (ACK response)
         {
-            USBSerial.print("Found address: ");
-            USBSerial.print(i, DEC);
-            USBSerial.print(" (0x");
-            USBSerial.print(i, HEX);
-            USBSerial.println(")");
+            serial_logger_usb_print("Found address: ");
+            serial_logger_usb_print(i, DEC);
+            serial_logger_usb_print(" (0x");
+            serial_logger_usb_print(i, HEX);
+            serial_logger_usb_println(")");
             count++;
         }
     }
-    USBSerial.print("Found ");
-    USBSerial.print(count, DEC);  // numbers of devices
-    USBSerial.println(" device(s).");
+    serial_logger_usb_print("Found ");
+    serial_logger_usb_print(count, DEC);  // numbers of devices
+    serial_logger_usb_println(" device(s).");
     return count;
 }
 
@@ -119,7 +120,7 @@ void sensor_calc_offset_avarage(void) {
 
 void test_voltage(void) {
     for (uint16_t i = 0; i < 1000; i++) {
-        USBSerial.printf("Voltage[%03d]:%f\n\r", i, ina3221.getVoltage(INA3221_CH2));
+        print("Voltage[%03d]:%f\n\r", i, ina3221.getVoltage(INA3221_CH2));
     }
 }
 
@@ -132,8 +133,8 @@ void sensor_init() {
 
     Wire1.begin(SDA_PIN, SCL_PIN, 400000UL);
     if (scan_i2c() == 0) {
-        USBSerial.printf("No I2C device!\r\n");
-        USBSerial.printf("Can not boot AtomFly2.\r\n");
+        print("No I2C device!\r\n");
+        print("Can not boot AtomFly2.\r\n");
         while (1);
     }
 
@@ -143,10 +144,10 @@ void sensor_init() {
     delay(50);
 
     if (!flow.begin()) {
-        USBSerial.printf("PMW3901 initialization failed\r\n");
+        print("PMW3901 initialization failed\r\n");
         while (1);
     }
-    USBSerial.printf("PMW3901 initialized successfully\r\n");
+    print("PMW3901 initialized successfully\r\n");
     Drone_ahrs.begin(400.0);
     ina3221.begin(&Wire1);
     ina3221.reset();
@@ -157,7 +158,7 @@ void sensor_init() {
         if (ToF_bottom_data_ready_flag) {
             ToF_bottom_data_ready_flag = 0;
             cnt++;
-            USBSerial.printf("%d %d\n\r", cnt, tof_bottom_get_range());
+            print("%d %d\n\r", cnt, tof_bottom_get_range());
         }
     }
     delay(10);

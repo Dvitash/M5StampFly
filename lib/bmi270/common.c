@@ -298,7 +298,7 @@ uint8_t pmw_read_reg(uint8_t addr) {
         return 0xFF;
     }
 
-    ets_delay_us(50); // ≥35 µs (tSRAD)
+    ets_delay_us(50); // >=35 µs (tSRAD)
 
     t2.length = 8;
     t2.rxlength = 8;

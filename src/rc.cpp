@@ -31,6 +31,7 @@
 #include "flight_control.hpp"
 #include <buzzer.h>
 #include "imu.hpp"
+#include "serial_logger.hpp"
 
 extern volatile float acc_x, acc_y, acc_z;
 extern volatile float gyro_x, gyro_y, gyro_z;
@@ -74,7 +75,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *recv_data, int data_len)
         peerInfo.channel = CHANNEL;
         peerInfo.encrypt = false;
         if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-            USBSerial.println("Failed to add peer2");
+            serial_logger_usb_println("Failed to add peer2");
             memset(TelemAddr, 0, 6);
         } else {
             esp_now_register_send_cb(on_esp_now_sent);
@@ -265,6 +266,27 @@ void handle_telemetry() {
     server.send(200, "application/json", j);
 }
 
+void handle_logs() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache");
+    
+    uint32_t last_id = 0;
+    if (server.hasArg("last_id")) {
+        last_id = server.arg("last_id").toInt();
+    }
+    
+    String json;
+    uint32_t new_last_id = last_id;
+    serial_logger_get_json(json, new_last_id);
+    
+    server.send(200, "application/json", json);
+}
+
+void handle_ping() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", "pong");
+}
+
 void rc_init(void) {
     // Initialize Stick list
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
@@ -280,18 +302,18 @@ void rc_init(void) {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, 1);
 
-    USBSerial.println("Access Point started!");
-    USBSerial.print("IP address: ");
-    USBSerial.println(WiFi.softAPIP());
+    serial_logger_usb_println("Access Point started!");
+    serial_logger_usb_print("IP address: ");
+    serial_logger_usb_println(WiFi.softAPIP().toString());
 
     WiFi.macAddress((uint8_t *)MyMacAddr);
-    USBSerial.printf("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
+    print("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
                      MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
 
     if (esp_now_init() == ESP_OK) {
-        USBSerial.println("ESPNow Init Success");
+        serial_logger_usb_println("ESPNow Init Success");
     } else {
-        USBSerial.println("ESPNow Init Failed");
+        serial_logger_usb_println("ESPNow Init Failed");
         ESP.restart();
     }
 
@@ -301,7 +323,7 @@ void rc_init(void) {
     peerInfo.channel = CHANNEL;
     peerInfo.encrypt = false;
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        USBSerial.println("Failed to add peer");
+        serial_logger_usb_println("Failed to add peer");
         return;
     }
     esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -310,22 +332,24 @@ void rc_init(void) {
     for (uint16_t i = 0; i < 50; i++) {
         send_peer_info();
         delay(50);
-        USBSerial.printf("%d\n", i);
+        print("%d\n", i);
     }
 
     // ESP-NOW再初期化
     // WiFi.mode(WIFI_STA);
     // WiFi.disconnect();
     if (esp_now_init() == ESP_OK) {
-        USBSerial.println("ESPNow Init Success2");
+        serial_logger_usb_println("ESPNow Init Success2");
     } else {
-        USBSerial.println("ESPNow Init Failed2");
+        serial_logger_usb_println("ESPNow Init Failed2");
         ESP.restart();
     }
 
     // ESP-NOWコールバック登録
     esp_now_register_recv_cb(OnDataRecv);
-    USBSerial.println("ESP-NOW Ready.");
+    serial_logger_usb_println("ESP-NOW Ready.");
+
+    serial_logger_init();
 
     server.on("/buzz/start", HTTP_GET, startBuzz);
     server.on("/buzz/stop", HTTP_GET, stopBuzz);
@@ -334,6 +358,8 @@ void rc_init(void) {
     server.on("/move", HTTP_GET, handle_movement);
     server.on("/move/stop", HTTP_GET, handle_stop);
     server.on("/telemetry", HTTP_GET, handle_telemetry);
+    server.on("/logs", HTTP_GET, handle_logs);
+    server.on("/ping", HTTP_GET, handle_ping);
 
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
@@ -341,6 +367,8 @@ void rc_init(void) {
     server.on("/hover", HTTP_OPTIONS, handle_options);
     server.on("/move", HTTP_OPTIONS, handle_options);
     server.on("/move/stop", HTTP_OPTIONS, handle_options);
+    server.on("/logs", HTTP_OPTIONS, handle_options);
+    server.on("/ping", HTTP_OPTIONS, handle_options);
 
     // server.on("/move", handle_movement);
     // server.on("/move/stop", handle_stop);

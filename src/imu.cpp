@@ -28,6 +28,7 @@
 #include "bmi2.h"
 #include "imu.hpp"
 #include <bmi270.h>
+#include "serial_logger.hpp"
 
 float acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z;
 struct bmi2_sens_data imu_data;
@@ -36,7 +37,7 @@ void imu_init(void) {
     int8_t st;
     uint8_t data = 0;
 
-    USBSerial.printf("Start IMU Initialize!\n\r");
+    print("Start IMU Initialize!\n\r");
 
     pinMode(46, OUTPUT);  // CSを設定
     digitalWrite(46, 1);  // CSをHIGH
@@ -44,29 +45,29 @@ void imu_init(void) {
     digitalWrite(12, 1);  // CSをHIGH
     delay(5);
     esp_err_t spi_ret = spi_init();
-    USBSerial.printf("SPI Initilize status:%d\n\r", spi_ret);
+    print("SPI Initilize status:%d\n\r", spi_ret);
     if (spi_ret != ESP_OK) {
-        USBSerial.printf("SPI initialization failed!\n\r");
+        print("SPI initialization failed!\n\r");
         while (1);
     }
 
     // BMI270 Init
     bmi270_dev_init();
     st = bmi270_init(pBmi270);
-    USBSerial.printf("#INIT Status:%d\n\r", st);
+    print("#INIT Status:%d\n\r", st);
     if (st != 0) {
-        USBSerial.printf("BMI270 INIT Fail!\n\r");
+        print("BMI270 INIT Fail!\n\r");
         while (1);
     }
-    USBSerial.printf("#Chip ID DEV:%02X\n\r", Bmi270.chip_id);
-    USBSerial.printf("#APP_STATUS:%02X\n\r", Bmi270.aps_status);
+    print("#Chip ID DEV:%02X\n\r", Bmi270.chip_id);
+    print("#APP_STATUS:%02X\n\r", Bmi270.aps_status);
 
-    USBSerial.printf("#INIT_STATUS Read:%d\n\r", bmi2_get_regs(0x21, &data, 1, pBmi270));
-    USBSerial.printf("#INIT_STATUS:%02X\n\r", data);
+    print("#INIT_STATUS Read:%d\n\r", bmi2_get_regs(0x21, &data, 1, pBmi270));
+    print("#INIT_STATUS:%02X\n\r", data);
     // IMU Config
-    USBSerial.printf("#Config Status:%d\n\r", set_accel_gyro_config(pBmi270));
+    print("#Config Status:%d\n\r", set_accel_gyro_config(pBmi270));
     uint8_t sensor_list[2] = {BMI2_ACCEL, BMI2_GYRO};
-    USBSerial.printf("#Sensor enable Status:%d\n\r", bmi2_sensor_enable(sensor_list, 2, pBmi270));
+    print("#Sensor enable Status:%d\n\r", bmi2_sensor_enable(sensor_list, 2, pBmi270));
 }
 
 void imu_update(void) {
@@ -129,7 +130,7 @@ void imu_test(void) {
         gyro_y = lsb_to_rps(imu_data.gyr.y, DPS10002RAD, 16);
         gyro_z = lsb_to_rps(imu_data.gyr.z, DPS10002RAD, 16);
 #if 1
-        USBSerial.printf("%8.4f %7.5f %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %d\n\r", (float)(now - st) * 1.0e-6,
+        print("%8.4f %7.5f %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %d\n\r", (float)(now - st) * 1.0e-6,
                          (float)(now - old) * 1.0e-6, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, ret);
 #endif
     }

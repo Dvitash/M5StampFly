@@ -45,6 +45,7 @@
 #include "telemetry.hpp"
 #include "button.hpp"
 #include "buzzer.h"
+#include "serial_logger.hpp"
 
 // モータPWM出力Pinのアサイン
 // Motor PWM Pin
@@ -127,7 +128,7 @@ volatile float target_y                = 0;
 volatile float current_x               = 0;
 volatile float current_y               = 0;
 constexpr float MARGIN_OF_ERROR_PIXELS = 50;
-constexpr float CORRECTION_MOTOR_SPEED = 0.05f;
+constexpr float CORRECTION_MOTOR_SPEED = 0.1f;
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -270,18 +271,19 @@ void init_copter(void) {
 
     // Initialize Serial communication
     USBSerial.begin(115200);
+    serial_logger_set_target(&USBSerial);
 
     delay(1500);
-    USBSerial.printf("Start StampFly!\r\n");
+    print("Start StampFly!\r\n");
 
     // Initialize PWM
     init_pwm();
 
-    USBSerial.println("PMW3901 ready");
+    serial_logger_usb_println("PMW3901 ready");
     delay(1000);
 
     sensor_init();
-    USBSerial.printf("Finish sensor init!\r\n");
+    print("Finish sensor init!\r\n");
 
     // PID GAIN and etc. Init
     control_init();
@@ -301,8 +303,8 @@ void init_copter(void) {
 
     setup_pwm_buzzer();
 
-    USBSerial.printf("Finish StampFly init!\r\n");
-    USBSerial.printf("Enjoy Flight!\r\n");
+    print("Finish StampFly init!\r\n");
+    print("Enjoy Flight!\r\n");
     start_tone();
 }
 
@@ -373,8 +375,7 @@ void loop_400Hz(void) {
         // Rate Control
         rate_control();
 
-        // hold_hover_position();
-
+        hold_hover_position();
     } else if (Mode == FLIP_MODE) {
         flip();
     } else if (Mode == PARKING_MODE) {
@@ -433,7 +434,7 @@ void loop_400Hz(void) {
     if (gotMotion) {
         current_x += deltaX;
         current_y += deltaY;
-        USBSerial.printf("x: %f y: %f dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
+        // print("x: %f y: %f dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
     }
 
     uint32_t ce_time = micros();
@@ -443,7 +444,7 @@ void loop_400Hz(void) {
 }
 
 void flip(void) {
-    USBSerial.println("Received flip");
+    serial_logger_usb_println("Received flip");
 
     float domega;
     float flip_delay;
@@ -457,7 +458,7 @@ void flip(void) {
     if (rc_isconnected() == 0) Mode = AUTO_LANDING_MODE;
     if (OverG_flag == 1) Mode = PARKING_MODE;
 
-    USBSerial.printf("Mode: %u\n", Mode);
+    print("Mode: %u\n", Mode);
 
     // Flip parameter set
     Flip_time            = 0.4;
@@ -1136,39 +1137,26 @@ void auto_takeoff_and_hover(float target_altitude) {
     PositionHold_flag = 1;
 }
 
+int8_t sign(float x) {
+    return (x > 0) ? 1 : (x < 0) ? -1 : 0;
+}
+
 void hold_hover_position() {
     float distance_x = target_x - current_x;
     float distance_y = target_y - current_y;
 
     float distance_magnitude = sqrt(distance_x * distance_x + distance_y * distance_y);
 
-    // small damping to avoid abrupt jumps
-    Stick[AILERON] *= 0.95f;
-    Stick[ELEVATOR] *= 0.95f;
+    Stick[AILERON] *= 0.95;
+    Stick[ELEVATOR] *= 0.95;
 
-    // If user moves sticks significantly, treat as user override and disable position hold
-    if (fabsf(Stick[AILERON]) > 0.2f || fabsf(Stick[ELEVATOR]) > 0.2f) {
-        PositionHold_flag = 0;
+    print("distance_x: %f, distance_y: %f\r\n", distance_x, distance_y);
+    print("Stick[AILERON]: %f, Stick[ELEVATOR]: %f\r\n", Stick[AILERON], Stick[ELEVATOR]);
+
+    if (distance_magnitude < MARGIN_OF_ERROR_PIXELS) {  // if already there
         return;
     }
 
-    // If within margin, nothing to do
-    if (distance_magnitude < MARGIN_OF_ERROR_PIXELS) {
-        return;
-    }
-
-    // Proportional correction scaled by margin -> convert pixel error to stick correction
-    float k      = CORRECTION_MOTOR_SPEED / (float)MARGIN_OF_ERROR_PIXELS;
-    float corr_x = -k * distance_x;  // negative so positive distance_x -> negative aileron (roll)
-    float corr_y = -k * distance_y;  // similarly for elevator
-
-    // clamp corrections
-    if (corr_x > CORRECTION_MOTOR_SPEED) corr_x = CORRECTION_MOTOR_SPEED;
-    if (corr_x < -CORRECTION_MOTOR_SPEED) corr_x = -CORRECTION_MOTOR_SPEED;
-    if (corr_y > CORRECTION_MOTOR_SPEED) corr_y = CORRECTION_MOTOR_SPEED;
-    if (corr_y < -CORRECTION_MOTOR_SPEED) corr_y = -CORRECTION_MOTOR_SPEED;
-
-    // Smoothly blend user stick (tiny residual) and correction
-    Stick[AILERON]  = 0.5f * Stick[AILERON] + 0.5f * corr_x;
-    Stick[ELEVATOR] = 0.5f * Stick[ELEVATOR] + 0.5f * corr_y;
+    Stick[AILERON]  = sign(distance_x) * CORRECTION_MOTOR_SPEED;
+    Stick[ELEVATOR] = sign(distance_y) * CORRECTION_MOTOR_SPEED;
 }
