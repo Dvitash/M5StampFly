@@ -128,7 +128,20 @@ volatile float target_y                = 0;
 volatile float current_x               = 0;
 volatile float current_y               = 0;
 constexpr float MARGIN_OF_ERROR_PIXELS = 50;
-constexpr float CORRECTION_MOTOR_SPEED = 0.1f;
+constexpr float CORRECTION_MOTOR_SPEED = 0.25f;
+
+// Position control PID gain
+const float pos_x_kp     = 0.00005f;  // conversion from pixels to angle command
+const float pos_x_ti     = 5.0f;
+const float pos_x_td     = 0.01f;
+const float pos_x_eta    = 0.125f;
+const float pos_x_period = 0.0025f;  // 400Hz
+
+const float pos_y_kp     = 0.00005f;
+const float pos_y_ti     = 5.0f;
+const float pos_y_td     = 0.01f;
+const float pos_y_eta    = 0.125f;
+const float pos_y_period = 0.0025f;
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -178,14 +191,14 @@ int8_t BtnA_counter                   = 0;
 uint8_t BtnA_on_flag                  = 0;
 uint8_t BtnA_off_flag                 = 1;
 volatile uint8_t Loop_flag            = 0;
-// Position hold (skyhook) flag: when set, the controller will try to keep
-// the current lateral position using optical flow corrections.
-volatile uint8_t PositionHold_flag = 0;
 // volatile uint8_t Angle_control_flag = 0;
 uint8_t Stick_return_flag     = 0;
 uint8_t Throttle_control_mode = 0;
 uint8_t Landing_state         = 0;
 uint8_t OladRange0flag        = 0;
+// Position hold (skyhook) flag: when set, the controller will try to keep
+// the current lateral position using optical flow corrections.
+volatile uint8_t PositionHold_flag = 0;
 
 // for flip
 float FliRoll_rate_time          = 2.0;
@@ -205,6 +218,8 @@ PID psi_pid;
 // PID alt;
 PID alt_pid;
 PID z_dot_pid;
+PID pos_x_pid;
+PID pos_y_pid;
 Filter Thrust_filtered;
 Filter Duty_fr;
 Filter Duty_fl;
@@ -331,8 +346,6 @@ void loop_400Hz(void) {
 
     handleClient();
 
-    // if (Interval_time>0.006)USBSerial.printf("%9.6f\n\r", Interval_time);
-    // USBSerial.printf("Mode=%d OverG=%d\n\r", Mode, OverG_flag);
     // Begin Mode select
     if (Mode == INIT_MODE) {
         motor_stop();
@@ -375,7 +388,8 @@ void loop_400Hz(void) {
         // Rate Control
         rate_control();
 
-        hold_hover_position();
+        // Position hold is now handled in get_command() when PositionHold_flag is set
+        // hold_hover_position();
     } else if (Mode == FLIP_MODE) {
         flip();
     } else if (Mode == PARKING_MODE) {
@@ -621,6 +635,10 @@ void control_init(void) {
     alt_pid.set_parameter(alt_kp, alt_ti, alt_td, alt_eta, alt_period);
     z_dot_pid.set_parameter(z_dot_kp, z_dot_ti, z_dot_td, alt_eta, alt_period);
 
+    // Position control
+    pos_x_pid.set_parameter(pos_x_kp, pos_x_ti, pos_x_td, pos_x_eta, pos_x_period);
+    pos_y_pid.set_parameter(pos_y_kp, pos_y_ti, pos_y_td, pos_y_eta, pos_y_period);
+
     Duty_fl.set_parameter(0.003, Control_period);
     Duty_fr.set_parameter(0.003, Control_period);
     Duty_rl.set_parameter(0.003, Control_period);
@@ -711,10 +729,39 @@ void get_command(void) {
         Pitch_angle_command = 0.4 * Stick[ELEVATOR];
         if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
         if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+
+        // Position hold correction (add to stick-based commands)
+        if (PositionHold_flag == 1 && Mode == FLIGHT_MODE) {
+            float pos_x_err = target_x - current_x;
+            float pos_y_err = target_y - current_y;
+            float distance_magnitude = sqrt(pos_x_err * pos_x_err + pos_y_err * pos_y_err);
+
+            // only apply corrections if outside deadband
+            if (distance_magnitude > MARGIN_OF_ERROR_PIXELS) {
+                float roll_correction  = pos_x_pid.update(pos_x_err, Interval_time);
+                float pitch_correction = pos_y_pid.update(pos_y_err, Interval_time);
+
+                // add corrections to stick-based commands
+                // negative roll_correction for x: if we're too far right (pos_x_err > 0), tilt left (negative roll)
+                Roll_angle_command -= roll_correction;
+                // positive pitch_correction for y: if we're too far forward (pos_y_err > 0), tilt back (positive pitch)
+                Pitch_angle_command += pitch_correction;
+
+                // clamp to limits
+                if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
+                if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
+                if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
+                if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+            } else {
+                // reset integral when within deadband to prevent windup
+                pos_x_pid.i_reset();
+                pos_y_pid.i_reset();
+            }
+        }
     } else if (Control_mode == RATECONTROL) {
         Roll_rate_reference  = get_rate_ref(Stick[AILERON]);
         Pitch_rate_reference = get_rate_ref(Stick[ELEVATOR]);
-        // USBSerial.printf("%9.6f\n\r", Pitch_rate_reference*180.0f/PI);
+        // USBSerial.printf("%9.6f\n\r", Pitch_rate_reference*180.0f/PI);ilear
     }
 
     Yaw_angle_command = Stick[RUDDER];
@@ -979,6 +1026,8 @@ void reset_rate_control(void) {
     r_pid.reset();
     alt_pid.reset();
     z_dot_pid.reset();
+    pos_x_pid.reset();
+    pos_y_pid.reset();
     Roll_rate_reference  = 0.0f;
     Pitch_rate_reference = 0.0f;
     Yaw_rate_reference   = 0.0f;
@@ -1135,6 +1184,9 @@ void auto_takeoff_and_hover(float target_altitude) {
     target_y = current_y;
     // enable position hold (skyhook)
     PositionHold_flag = 1;
+    // reset position PID controllers
+    pos_x_pid.reset();
+    pos_y_pid.reset();
 }
 
 int8_t sign(float x) {
@@ -1157,6 +1209,6 @@ void hold_hover_position() {
         return;
     }
 
-    Stick[AILERON]  = sign(distance_x) * CORRECTION_MOTOR_SPEED;
+    Stick[AILERON]  = -sign(distance_x) * CORRECTION_MOTOR_SPEED;
     Stick[ELEVATOR] = sign(distance_y) * CORRECTION_MOTOR_SPEED;
 }
