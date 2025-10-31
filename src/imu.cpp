@@ -43,7 +43,12 @@ void imu_init(void) {
     pinMode(12, OUTPUT);  // CSを設定
     digitalWrite(12, 1);  // CSをHIGH
     delay(5);
-    USBSerial.printf("SPI Initilize status:%d\n\r", spi_init());
+    esp_err_t spi_ret = spi_init();
+    USBSerial.printf("SPI Initilize status:%d\n\r", spi_ret);
+    if (spi_ret != ESP_OK) {
+        USBSerial.printf("SPI initialization failed!\n\r");
+        while (1);
+    }
 
     // BMI270 Init
     bmi270_dev_init();

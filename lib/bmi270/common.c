@@ -10,6 +10,8 @@
 #include <string.h>
 
 #include "common.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 //#include "bmi2_defs.h"
 
 //#include "driver/i2c.h"
@@ -42,9 +44,8 @@ struct bmi2_dev *pBmi270=&Bmi270;
 i2c_cmd_handle_t i2chandle;
 
 // SPIデバイスハンドラーを使って通信する
-spi_device_handle_t spidev;
-
-
+spi_device_handle_t bmi270;
+spi_device_handle_t pmw3901;
 
 i2c_port_t i2c_port=1;
 
@@ -174,16 +175,36 @@ spi_device_interface_config_t devcfg = {
     .post_cb = NULL,// transactionが完了した後に呼ばれる関数をセットできる
 };
 
+spi_device_interface_config_t pmw3901_cfg = {
+    .command_bits = 0,
+    .address_bits = 0,
+    .dummy_bits = 0,
+    .mode = 3,
+    .duty_cycle_pos = 128,
+    .cs_ena_pretrans = 1,
+    .cs_ena_posttrans = 70,
+    .clock_speed_hz = SPI_MASTER_FREQ_2M,
+    .spics_io_num = PIN_CS2,
+    .flags = 0,
+    .queue_size = 2,
+    .pre_cb = NULL,
+    .post_cb = NULL,
+};
 
 esp_err_t spi_init(void)
 {
+    esp_err_t ret = ESP_OK;
 
+    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) return ret;
 
-    //Initialize the SPI bus
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if(ret != ESP_OK) return ret;
+    ret = spi_bus_add_device(SPI2_HOST, &devcfg, &bmi270);
+    if (ret != ESP_OK) return ret;
 
-    ret = spi_bus_add_device(SPI2_HOST, &devcfg, &spidev);
+    ret = spi_bus_add_device(SPI2_HOST, &pmw3901_cfg, &pmw3901);
+    if (ret != ESP_OK) {
+        pmw3901 = NULL; // mark as invalid
+    }
     return ret;
 }
 
@@ -206,7 +227,7 @@ BMI2_INTF_RETURN_TYPE bmi2_spi_read(uint8_t reg_addr, uint8_t *reg_data, uint32_
     trans.tx_buffer =_I2CBuffer;
     trans.rx_buffer =reg_data;
     trans.length = 8+len*8;
-    ret=spi_device_polling_transmit(spidev, &trans);
+    ret=spi_device_polling_transmit(bmi270, &trans);
     uint16_t index = 0;
     while(index<len)
     {
@@ -242,11 +263,9 @@ BMI2_INTF_RETURN_TYPE bmi2_spi_write(uint8_t reg_addr, const uint8_t *reg_data, 
     trans.rxlength = 0;
 
     //書き込み
-    ret = spi_device_polling_transmit(spidev, &trans);
+    ret = spi_device_polling_transmit(bmi270, &trans);
     assert(ret==ESP_OK);
     
-    //spi_device_release_bus(spidev);
-
     return ret;
 }
 
@@ -257,6 +276,113 @@ void bmi2_delay_us(uint32_t period, void *intf_ptr)
 {
     //coines_delay_usec(period);
     ets_delay_us(period);
+}
+
+uint8_t pmw_read_reg(uint8_t addr) {
+    spi_transaction_t t1 = {0}, t2 = {0};
+    uint8_t tx = addr & 0x7F, rx = 0;
+    esp_err_t ret;
+
+    if (pmw3901 == NULL) return 0xFF;
+
+    // acquire bus with timeout to ensure BMI270 releases it
+    ret = spi_device_acquire_bus(pmw3901, portMAX_DELAY);
+    if (ret != ESP_OK) return 0xFF;
+
+    t1.length = 8;
+    t1.tx_buffer = &tx;
+    t1.flags = SPI_TRANS_CS_KEEP_ACTIVE;
+    ret = spi_device_polling_transmit(pmw3901, &t1);
+    if (ret != ESP_OK) {
+        spi_device_release_bus(pmw3901);
+        return 0xFF;
+    }
+
+    ets_delay_us(50); // ≥35 µs (tSRAD)
+
+    t2.length = 8;
+    t2.rxlength = 8;
+    t2.rx_buffer = &rx;
+    ret = spi_device_polling_transmit(pmw3901, &t2);
+    spi_device_release_bus(pmw3901);
+    if (ret != ESP_OK) return 0xFF;
+
+    ets_delay_us(20);
+
+    return rx;
+}
+
+void pmw_write_reg(uint8_t addr, uint8_t val) {
+    spi_transaction_t t1 = {0}, t2 = {0};
+    uint8_t tx1 = addr | 0x80;
+    esp_err_t ret;
+
+    if (pmw3901 == NULL) return;
+
+    // acquire bus with timeout to ensure BMI270 releases it
+    ret = spi_device_acquire_bus(pmw3901, portMAX_DELAY);
+    if (ret != ESP_OK) return;
+
+    t1.length = 8;
+    t1.tx_buffer = &tx1;
+    t1.flags = SPI_TRANS_CS_KEEP_ACTIVE;
+    ret = spi_device_polling_transmit(pmw3901, &t1);
+    if (ret != ESP_OK) {
+        spi_device_release_bus(pmw3901);
+        return;
+    }
+
+    t2.length = 8;
+    t2.tx_buffer = &val;
+    ret = spi_device_polling_transmit(pmw3901, &t2);
+    spi_device_release_bus(pmw3901);
+    if (ret != ESP_OK) return;
+
+    ets_delay_us(50);
+}
+
+void pmw_read_burst(pmw_burst_t* out) {
+    spi_transaction_t t1 = {0}, t2 = {0};
+    uint8_t addr = 0x16;
+    esp_err_t ret;
+
+    if (pmw3901 == NULL) {
+        memset(out, 0, sizeof(pmw_burst_t));
+        return;
+    }
+
+    // acquire bus with timeout to ensure BMI270 releases it
+    ret = spi_device_acquire_bus(pmw3901, portMAX_DELAY);
+    if (ret != ESP_OK) {
+        memset(out, 0, sizeof(pmw_burst_t));
+        return;
+    }
+
+    t1.length = 8;
+    t1.tx_buffer = &addr;
+    t1.flags = SPI_TRANS_CS_KEEP_ACTIVE;
+    ret = spi_device_polling_transmit(pmw3901, &t1);
+    if (ret != ESP_OK) {
+        spi_device_release_bus(pmw3901);
+        memset(out, 0, sizeof(pmw_burst_t));
+        return;
+    }
+
+    ets_delay_us(50); // ≥35 µs
+
+    t2.length = sizeof(pmw_burst_t)*8;
+    t2.rxlength = sizeof(pmw_burst_t)*8;
+    t2.rx_buffer = out;
+    ret = spi_device_polling_transmit(pmw3901, &t2);
+    spi_device_release_bus(pmw3901);
+    if (ret != ESP_OK) {
+        memset(out, 0, sizeof(pmw_burst_t));
+        return;
+    }
+
+    out->shutter = (out->shutter >> 8) | (out->shutter << 8);
+
+    ets_delay_us(20);
 }
 
 /*!

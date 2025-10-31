@@ -64,6 +64,7 @@ volatile float Alt_velocity    = 0.0f;
 volatile float Az              = 0.0;
 volatile float Az_bias         = 0.0;
 int16_t deltaX, deltaY;
+PMW3901 flow;
 
 volatile uint16_t Offset_counter = 0;
 
@@ -138,6 +139,14 @@ void sensor_init() {
 
     tof_init();
     imu_init();
+
+    delay(50);
+
+    if (!flow.begin()) {
+        USBSerial.printf("PMW3901 initialization failed\r\n");
+        while (1);
+    }
+    USBSerial.printf("PMW3901 initialized successfully\r\n");
     Drone_ahrs.begin(400.0);
     ina3221.begin(&Wire1);
     ina3221.reset();

@@ -42,7 +42,22 @@ void bmi270_dev_init(void);
 #define PIN_CS (46)
 #define PIN_CS2 (12)   
 
+typedef struct __attribute__((packed)) {
+    uint8_t motion;
+    uint8_t observation;
+    int16_t dx;
+    int16_t dy;
+    uint8_t squal;
+    uint8_t rawsum;
+    uint8_t rawmax;
+    uint8_t rawmin;
+    uint16_t shutter;
+} pmw_burst_t;
+
 esp_err_t spi_init(void);
+uint8_t pmw_read_reg(uint8_t addr);
+void pmw_write_reg(uint8_t addr, uint8_t val);
+void pmw_read_burst(pmw_burst_t* out);
 
 /******************************************************************************/
 /*!           Static Function Declaration                                     */

@@ -45,8 +45,6 @@
 #include "telemetry.hpp"
 #include "button.hpp"
 #include "buzzer.h"
-#include <SPI.h>
-#include <pmw3901.h>
 
 // モータPWM出力Pinのアサイン
 // Motor PWM Pin
@@ -256,8 +254,6 @@ void request_mode_change(uint8_t mode) {
     Mode = mode;
 }
 
-static PMW3901 flow;
-
 // Initialize Multi copter
 void init_copter(void) {
     // Initialize Mode
@@ -284,15 +280,8 @@ void init_copter(void) {
     USBSerial.println("PMW3901 ready");
     delay(1000);
 
-    // sensor_init();
+    sensor_init();
     USBSerial.printf("Finish sensor init!\r\n");
-
-    SPI.begin(PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_CS2);
-    if (!flow.begin(PIN_CS2, SPI)) {
-        USBSerial.println("Initialization of the flow sensor failed");
-        while (1) {
-        }
-    }
 
     // PID GAIN and etc. Init
     control_init();
@@ -332,7 +321,7 @@ void loop_400Hz(void) {
     Timevalue += 0.0025f;
 
     // Read Sensor Value
-    // sense_time       = sensor_read();
+    sense_time       = sensor_read();
     uint32_t cs_time = micros();
 
     // LED Drive
@@ -441,10 +430,11 @@ void loop_400Hz(void) {
     bool gotMotion = false;
     flow.readMotion(deltaX, deltaY, gotMotion);
 
-    current_x += deltaX;
-    current_y += deltaY;
-
-    USBSerial.printf("x: %f y: %f dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
+    if (gotMotion) {
+        current_x += deltaX;
+        current_y += deltaY;
+        USBSerial.printf("x: %f y: %f dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
+    }
 
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;
