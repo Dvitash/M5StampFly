@@ -257,7 +257,6 @@ void request_mode_change(uint8_t mode) {
 }
 
 static PMW3901 flow;
-SPIClass spi2(HSPI);
 
 // Initialize Multi copter
 void init_copter(void) {
@@ -282,18 +281,18 @@ void init_copter(void) {
     // Initialize PWM
     init_pwm();
 
-    spi2.begin(PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_CS2);
-    if (!flow.begin(PIN_CS2, spi2)) {
+    USBSerial.println("PMW3901 ready");
+    delay(1000);
+
+    // sensor_init();
+    USBSerial.printf("Finish sensor init!\r\n");
+
+    SPI.begin(PIN_NUM_CLK, PIN_NUM_MISO, PIN_NUM_MOSI, PIN_CS2);
+    if (!flow.begin(PIN_CS2, SPI)) {
         USBSerial.println("Initialization of the flow sensor failed");
         while (1) {
         }
     }
-
-    USBSerial.println("PMW3901 ready");
-    delay(1000);
-
-    sensor_init();
-    USBSerial.printf("Finish sensor init!\r\n");
 
     // PID GAIN and etc. Init
     control_init();
@@ -320,16 +319,6 @@ void init_copter(void) {
 
 // Main loop
 void loop_400Hz(void) {
-    int16_t deltaX, deltaY = 0;
-    bool gotMotion = false;
-    flow.readMotion(deltaX, deltaY, gotMotion);
-
-    current_x += deltaX;
-    current_y += deltaY;
-
-    flow.debugStatus();
-    // USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
-
     static uint8_t led = 1;
     float sense_time;
     // 割り込みにより400Hzで以降のコードが実行
@@ -343,7 +332,7 @@ void loop_400Hz(void) {
     Timevalue += 0.0025f;
 
     // Read Sensor Value
-    sense_time       = sensor_read();
+    // sense_time       = sensor_read();
     uint32_t cs_time = micros();
 
     // LED Drive
@@ -448,17 +437,14 @@ void loop_400Hz(void) {
         rate_control();
     }
 
-    // int16_t deltaX, deltaY;
-    // flow.readMotionCount(&deltaX, &deltaY);
+    int16_t deltaX = 0, deltaY = 0;
+    bool gotMotion = false;
+    flow.readMotion(deltaX, deltaY, gotMotion);
 
-    // current_x += deltaX;
-    // current_y += deltaY;
+    current_x += deltaX;
+    current_y += deltaY;
 
-    // USBSerial.printf("x: %d y: %d dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
-
-    //// Telemetry
-    // telemetry_fast();
-    telemetry();
+    USBSerial.printf("x: %f y: %f dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
 
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;

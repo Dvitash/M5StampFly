@@ -101,16 +101,6 @@ class PMW3901 {
         gotMotion = _currentMotion.motion == 0XB0;
     }
 
-    void debugStatus() {
-        registerRead(_csPin, 0x02);  // latch motion burst
-        int16_t dx = (int16_t(registerRead(_csPin, 0x04)) << 8) | registerRead(_csPin, 0x03);
-        int16_t dy = (int16_t(registerRead(_csPin, 0x06)) << 8) | registerRead(_csPin, 0x05);
-        uint8_t s = registerRead(_csPin, 0x07), sum = registerRead(_csPin, 0x08), mx = registerRead(_csPin, 0x09),
-                mn  = registerRead(_csPin, 0x0A);
-        uint16_t sh = (uint16_t(registerRead(_csPin, 0x0C)) << 8) | registerRead(_csPin, 0x0B);
-        USBSerial.printf("dx=%d dy=%d SQUAL=%u RawSum=%u Max=%u Min=%u Shutter=%u\n", dx, dy, s, sum, mx, mn, sh);
-    }
-
     void readMotion(int16_t& deltaX, int16_t& deltaY) {
         bool gotMotion = false;
 
