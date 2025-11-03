@@ -122,26 +122,41 @@ volatile float Old_Elapsed_time = 0.0f;
 volatile float Interval_time    = 0.0f;
 volatile uint32_t S_time = 0, E_time = 0, D_time = 0, Dt_time = 0;
 
-// Positions
+// Positions (in meters)
 volatile float target_x                = 0;
-volatile float target_y                = 0;
 volatile float current_x               = 0;
 volatile float current_y               = 0;
-constexpr float MARGIN_OF_ERROR_PIXELS = 50;
-constexpr float CORRECTION_MOTOR_SPEED = 0.25f;
+volatile float target_y                = 0;
+constexpr float MARGIN_OF_ERROR_METERS = 0.05f;  // deadband in meters (~50 pixels at 0.5m altitude)
 
 // Position control PID gain
-const float pos_x_kp     = 0.00005f;  // conversion from pixels to angle command
+// Position control now works in meters instead of pixels
+// kp converts meter error to angle command
+// Typical values:
+// - Conservative: kp = 0.005 (1m error → 0.005 angle command)
+// - For 3s settling time, 10° max tilt: kp ≈ 0.006
+// - For faster response (2s settling): kp ≈ 0.008-0.01
+//
+// Formula: kp = (max_tilt_rad / max_angle_cmd) / (settling_time * g)
+// where max_tilt_rad = 10° × π/180, settling_time = 3s, g = 9.81 m/s²
+const float pos_x_kp     = 0.005f;  // conversion from meters to angle command
 const float pos_x_ti     = 5.0f;
 const float pos_x_td     = 0.01f;
 const float pos_x_eta    = 0.125f;
 const float pos_x_period = 0.0025f;  // 400Hz
 
-const float pos_y_kp     = 0.00005f;
+const float pos_y_kp     = 0.005f;
 const float pos_y_ti     = 5.0f;
 const float pos_y_td     = 0.01f;
 const float pos_y_eta    = 0.125f;
 const float pos_y_period = 0.0025f;
+
+// altitude-dependent pixel-to-meter conversion for optical flow sensor
+// Formula: meters_per_pixel = 0.024 × Z, where Z is altitude in meters
+// Scale constant: 2tan(42°/2) / 35 ≈ 0.024 m/px per meter altitude
+// This is used when converting pixel deltas from sensor to meters
+constexpr float POS_PIXEL_SCALE     = 0.024f;  // m/px per meter altitude
+const float POS_SCALE_BASE_ALTITUDE = 0.5f;    // fallback altitude if sensor reading invalid
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -258,6 +273,8 @@ uint8_t auto_landing(void);
 float get_trim_duty(float voltage);
 void flip(void);
 float get_rate_ref(float x);
+float calculate_pos_kp_from_calibration(float pixels_per_meter, float settling_time, float max_tilt_deg);
+void calibrate_position_control(float physical_distance_m, float pixels_accumulated, float altitude_m);
 
 // 割り込み関数
 // Intrupt function
@@ -293,8 +310,6 @@ void init_copter(void) {
 
     // Initialize PWM
     init_pwm();
-
-    serial_logger_usb_println("PMW3901 ready");
     delay(1000);
 
     sensor_init();
@@ -346,6 +361,19 @@ void loop_400Hz(void) {
 
     handleClient();
 
+    if (Mode > AVERAGE_MODE) {
+        int16_t deltaX = 0, deltaY = 0;
+        bool gotMotion = false;
+
+        flow.readMotion(deltaX, deltaY, gotMotion);
+
+        if (gotMotion && Altitude2 > 0.1f) {
+            float meters_per_pixel = POS_PIXEL_SCALE * Altitude2;
+            current_x += deltaX * meters_per_pixel;
+            current_y += deltaY * meters_per_pixel;
+        }
+    }
+
     // Begin Mode select
     if (Mode == INIT_MODE) {
         motor_stop();
@@ -380,16 +408,13 @@ void loop_400Hz(void) {
         if (OverG_flag == 1) Mode = PARKING_MODE;
         if (Mode != OldMode) ahrs_reset();
 
-        // Get command
+        // Get command (includes position hold corrections)
         get_command();
         // Angle Control
         angle_control();
 
         // Rate Control
         rate_control();
-
-        // Position hold is now handled in get_command() when PositionHold_flag is set
-        // hold_hover_position();
     } else if (Mode == FLIP_MODE) {
         flip();
     } else if (Mode == PARKING_MODE) {
@@ -429,7 +454,6 @@ void loop_400Hz(void) {
         Duty_fl.reset();
         Duty_rr.reset();
         Duty_rl.reset();
-        // if(Mode != OldMode)ahrs_reset();
     } else if (Mode == AUTO_LANDING_MODE) {
         if (auto_landing() == 1) Mode = PARKING_MODE;
         if (judge_mode_change() == 1) Mode = PARKING_MODE;
@@ -439,16 +463,6 @@ void loop_400Hz(void) {
 
         // Rate Control
         rate_control();
-    }
-
-    int16_t deltaX = 0, deltaY = 0;
-    bool gotMotion = false;
-    flow.readMotion(deltaX, deltaY, gotMotion);
-
-    if (gotMotion) {
-        current_x += deltaX;
-        current_y += deltaY;
-        // print("x: %f y: %f dx: %d dy: %d\n", current_x, current_y, deltaX, deltaY);
     }
 
     uint32_t ce_time = micros();
@@ -732,14 +746,26 @@ void get_command(void) {
 
         // Position hold correction (add to stick-based commands)
         if (PositionHold_flag == 1 && Mode == FLIGHT_MODE) {
-            float pos_x_err = target_x - current_x;
-            float pos_y_err = target_y - current_y;
+            float pos_x_err          = target_x - current_x;
+            float pos_y_err          = target_y - current_y;
             float distance_magnitude = sqrt(pos_x_err * pos_x_err + pos_y_err * pos_y_err);
 
             // only apply corrections if outside deadband
-            if (distance_magnitude > MARGIN_OF_ERROR_PIXELS) {
+            if (distance_magnitude > MARGIN_OF_ERROR_METERS) {
+                // Store previous error for verification
+                static float prev_x_err             = 0.0f;
+                static float prev_y_err             = 0.0f;
+                static float prev_distance          = 0.0f;
+                static uint16_t convergence_counter = 0;
+                static uint16_t divergence_counter  = 0;
+
+                // position errors are now in meters, PID kp is calibrated for meters
                 float roll_correction  = pos_x_pid.update(pos_x_err, Interval_time);
                 float pitch_correction = pos_y_pid.update(pos_y_err, Interval_time);
+
+                // Store angle commands before correction to verify they're being modified
+                float roll_cmd_before  = Roll_angle_command;
+                float pitch_cmd_before = Pitch_angle_command;
 
                 // add corrections to stick-based commands
                 // negative roll_correction for x: if we're too far right (pos_x_err > 0), tilt left (negative roll)
@@ -752,11 +778,78 @@ void get_command(void) {
                 if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
                 if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
                 if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+
+                // Verify corrections are working:
+                // 1. Check if corrections are being applied (command changed)
+                bool roll_corrected  = (fabs(Roll_angle_command - roll_cmd_before) > 0.001f);
+                bool pitch_corrected = (fabs(Pitch_angle_command - pitch_cmd_before) > 0.001f);
+
+                // 2. Check if corrections are in correct direction
+                // For x: if error > 0 (too far right), correction should be positive (subtracted to tilt left)
+                // Roll_angle_command -= roll_correction, so positive correction = negative roll = tilt left
+                bool roll_direction_ok = (pos_x_err > 0 && roll_correction > 0) ||
+                                         (pos_x_err < 0 && roll_correction < 0) || (fabs(pos_x_err) < 1.0f);
+                // For y: if error > 0 (too far forward), correction should be positive (added to tilt back)
+                // Pitch_angle_command += pitch_correction, so positive correction = positive pitch = tilt back
+                bool pitch_direction_ok = (pos_y_err > 0 && pitch_correction > 0) ||
+                                          (pos_y_err < 0 && pitch_correction < 0) || (fabs(pos_y_err) < 1.0f);
+
+                // 3. Check convergence: distance should be decreasing
+                if (prev_distance > 0.0f) {
+                    if (distance_magnitude < prev_distance) {
+                        convergence_counter++;
+                        divergence_counter = 0;
+                    } else if (distance_magnitude > prev_distance) {
+                        divergence_counter++;
+                        convergence_counter = 0;
+                    }
+                }
+
+                // debug: log position control data every 100ms (40 loops at 400Hz)
+                // errors and distances are now in meters
+                static uint16_t debug_counter = 0;
+                debug_counter++;
+                if (debug_counter >= 40) {
+                    debug_counter         = 0;
+                    float error_change_x  = pos_x_err - prev_x_err;
+                    float error_change_y  = pos_y_err - prev_y_err;
+                    float distance_change = distance_magnitude - prev_distance;
+
+                    print("pos: err_x=%.1f err_y=%.1f | corr: roll=%.4f pitch=%.4f | cmd: roll=%.3f pitch=%.3f\n",
+                          pos_x_err, pos_y_err, roll_correction, pitch_correction, Roll_angle_command,
+                          Pitch_angle_command);
+                    print(
+                        "verify: roll_applied=%d pitch_applied=%d | dir_ok: roll=%d pitch=%d | dist=%.1f chg=%.1f "
+                        "conv=%d div=%d\n",
+                        roll_corrected, pitch_corrected, roll_direction_ok, pitch_direction_ok, distance_magnitude,
+                        distance_change, convergence_counter, divergence_counter);
+
+                    // Warning if corrections aren't working
+                    if (!roll_corrected && !pitch_corrected && distance_magnitude > MARGIN_OF_ERROR_METERS) {
+                        print("WARNING: No corrections applied despite position error!\n");
+                    }
+                    if (!roll_direction_ok || !pitch_direction_ok) {
+                        print("WARNING: Correction direction may be wrong!\n");
+                    }
+                    if (divergence_counter > 10) {
+                        print("WARNING: Position diverging for %d cycles - corrections may be ineffective\n",
+                              divergence_counter);
+                    }
+                }
+
+                // Update previous values
+                prev_x_err    = pos_x_err;
+                prev_y_err    = pos_y_err;
+                prev_distance = distance_magnitude;
             } else {
                 // reset integral when within deadband to prevent windup
                 pos_x_pid.i_reset();
                 pos_y_pid.i_reset();
             }
+        } else if (PositionHold_flag == 1 && Mode != FLIGHT_MODE) {
+            // if position hold is enabled but not in flight mode, reset PIDs
+            pos_x_pid.reset();
+            pos_y_pid.reset();
         }
     } else if (Control_mode == RATECONTROL) {
         Roll_rate_reference  = get_rate_ref(Stick[AILERON]);
@@ -1179,7 +1272,7 @@ void auto_takeoff_and_hover(float target_altitude) {
     Mode                  = FLIGHT_MODE;
     Stick[ALTCONTROLMODE] = AUTO_ALT;
 
-    // initialize the lateral hold target to the current optical-flow position
+    // initialize the lateral hold target to the current sensor-based position
     target_x = current_x;
     target_y = current_y;
     // enable position hold (skyhook)
@@ -1193,22 +1286,75 @@ int8_t sign(float x) {
     return (x > 0) ? 1 : (x < 0) ? -1 : 0;
 }
 
-void hold_hover_position() {
-    float distance_x = target_x - current_x;
-    float distance_y = target_y - current_y;
+// Calculate position control kp from calibration measurements
+// Formula: kp = (max_tilt_rad / max_angle_cmd) / (pixels_per_meter * settling_time * g)
+// Where:
+//   - max_tilt_rad: maximum tilt angle in radians (e.g., 10° = 0.175 rad)
+//   - max_angle_cmd: maximum angle command (1.0 for full stick)
+//   - pixels_per_meter: measured pixels per meter from calibration
+//   - settling_time: desired time to reach target (seconds)
+//   - g: gravitational acceleration (9.81 m/s²)
+float calculate_pos_kp_from_calibration(float pixels_per_meter, float settling_time, float max_tilt_deg) {
+    const float g             = 9.81f;                       // gravitational acceleration m/s²
+    const float max_angle_cmd = 1.0f;                        // maximum angle command (full stick)
+    const float max_tilt_rad  = max_tilt_deg * PI / 180.0f;  // convert degrees to radians
 
-    float distance_magnitude = sqrt(distance_x * distance_x + distance_y * distance_y);
+    if (pixels_per_meter <= 0.0f || settling_time <= 0.0f || max_tilt_deg <= 0.0f) {
+        return 0.0f;  // invalid parameters
+    }
 
-    Stick[AILERON] *= 0.95;
-    Stick[ELEVATOR] *= 0.95;
+    // Calculate kp using the physics-based formula
+    float kp = (max_tilt_rad / max_angle_cmd) / (pixels_per_meter * settling_time * g);
 
-    print("distance_x: %f, distance_y: %f\r\n", distance_x, distance_y);
-    print("Stick[AILERON]: %f, Stick[ELEVATOR]: %f\r\n", Stick[AILERON], Stick[ELEVATOR]);
+    return kp;
+}
 
-    if (distance_magnitude < MARGIN_OF_ERROR_PIXELS) {  // if already there
+// Calibration helper function: calculates and prints recommended kp values
+// Usage: Call this after moving copter a known distance and measuring pixels
+// Example: calibrate_position_control(0.5f, 100.0f, 0.5f);
+//   - moved 0.5m forward
+//   - accumulated 100 pixels
+//   - at 0.5m altitude
+void calibrate_position_control(float physical_distance_m, float pixels_accumulated, float altitude_m) {
+    if (physical_distance_m <= 0.0f || pixels_accumulated <= 0.0f || altitude_m <= 0.0f) {
+        print("ERROR: Invalid calibration parameters\n");
         return;
     }
 
-    Stick[AILERON]  = -sign(distance_x) * CORRECTION_MOTOR_SPEED;
-    Stick[ELEVATOR] = sign(distance_y) * CORRECTION_MOTOR_SPEED;
+    // Calculate pixels per meter
+    float pixels_per_meter = pixels_accumulated / physical_distance_m;
+
+    print("\n=== POSITION CONTROL CALIBRATION ===\n");
+    print("Measured data:\n");
+    print("  Physical distance: %.3f m\n", physical_distance_m);
+    print("  Pixels accumulated: %.1f pixels\n", pixels_accumulated);
+    print("  Altitude: %.3f m\n", altitude_m);
+    print("  Pixels per meter: %.2f pixels/m\n\n", pixels_per_meter);
+
+    // Calculate kp for different settling times and max tilt angles
+    print("Recommended kp values:\n");
+    print("Settling Time | Max Tilt | Calculated kp\n");
+    print("----------------------------------------\n");
+
+    float settling_times[] = {2.0f, 3.0f, 4.0f, 5.0f};
+    float max_tilts[]      = {8.0f, 10.0f, 12.0f, 15.0f};
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            float kp = calculate_pos_kp_from_calibration(pixels_per_meter, settling_times[i], max_tilts[j]);
+            print("%.1f s        | %5.1f°   | %.6f\n", settling_times[i], max_tilts[j], kp);
+        }
+    }
+
+    // Recommend a specific value (conservative: 3s settling, 10° max tilt)
+    float recommended_kp = calculate_pos_kp_from_calibration(pixels_per_meter, 3.0f, 10.0f);
+    print("\nRecommended (conservative): kp = %.6f\n", recommended_kp);
+    print("  Based on: 3.0s settling time, 10° max tilt\n");
+    print("  Copy this value to pos_x_kp and pos_y_kp in flight_control.cpp\n\n");
+
+    // Calculate altitude scaling factor
+    float scale_factor = POS_SCALE_BASE_ALTITUDE / altitude_m;
+    print("Altitude scaling factor: %.3f\n", scale_factor);
+    print("  (For altitude-dependent scaling, multiply kp by this factor)\n");
+    print("=====================================\n\n");
 }

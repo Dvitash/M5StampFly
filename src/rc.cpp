@@ -35,6 +35,7 @@
 
 extern volatile float acc_x, acc_y, acc_z;
 extern volatile float gyro_x, gyro_y, gyro_z;
+extern volatile float current_x, current_y;
 
 WebServer server(80);
 
@@ -260,6 +261,11 @@ void handle_telemetry() {
     j += ']';
     j += ",\"rc_ok\":";
     j += rc_isconnected() ? "true" : "false";
+    j += ",\"flow_pos\":[";
+    j += String(current_x, 2);
+    j += ',';
+    j += String(current_y, 2);
+    j += ']';
     j += ",\"mac\":\"";
     j += mac;
     j += "\"}";
@@ -285,6 +291,13 @@ void handle_logs() {
 void handle_ping() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "text/plain", "pong");
+}
+
+void handle_reset_position() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    current_x = 0.0f;
+    current_y = 0.0f;
+    server.send(200, "text/plain", "OK");
 }
 
 void rc_init(void) {
@@ -360,6 +373,7 @@ void rc_init(void) {
     server.on("/telemetry", HTTP_GET, handle_telemetry);
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
+    server.on("/reset/position", HTTP_GET, handle_reset_position);
 
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
@@ -369,6 +383,7 @@ void rc_init(void) {
     server.on("/move/stop", HTTP_OPTIONS, handle_options);
     server.on("/logs", HTTP_OPTIONS, handle_options);
     server.on("/ping", HTTP_OPTIONS, handle_options);
+    server.on("/reset/position", HTTP_OPTIONS, handle_options);
 
     // server.on("/move", handle_movement);
     // server.on("/move/stop", handle_stop);

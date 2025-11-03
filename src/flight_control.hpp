@@ -74,6 +74,8 @@ void set_duty_fl(float duty);
 void set_duty_rr(float duty);
 void set_duty_rl(float duty);
 void hold_hover_position(void);
+float calculate_pos_kp_from_calibration(float pixels_per_meter, float settling_time, float max_tilt_deg);
+void calibrate_position_control(float physical_distance_m, float pixels_accumulated, float altitude_m);
 
 // グローバル変数
 extern volatile uint8_t Mode;
@@ -160,4 +162,8 @@ extern uint8_t ahrs_reset_flag;
 extern uint8_t last_ahrs_reset_flag;
 
 extern PMW3901 flow;
+
+// position tracking from sensor data
+extern volatile float current_x;
+extern volatile float current_y;
 #endif

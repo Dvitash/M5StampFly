@@ -50,6 +50,18 @@ class PMW3901 {
         gotMotion = (burst.motion == 0xB0);
     }
 
+    void readMotion(int16_t &deltaX, int16_t &deltaY, bool &gotMotion, uint8_t &squal) {
+        pmw_burst_t burst;
+        pmw_read_burst(&burst);
+
+        deltaX = burst.dx;
+        deltaY = burst.dy;
+        squal = burst.squal;
+
+        // Datasheet: motion register == 0xB0 when new data valid
+        gotMotion = (burst.motion == 0xB0);
+    }
+
     void readMotion(int16_t &dx, int16_t &dy) {
         bool dummy;
         readMotion(dx, dy, dummy);

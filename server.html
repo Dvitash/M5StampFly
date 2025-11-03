@@ -34,7 +34,7 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: 1.1fr 0.9fr;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 12px;
     padding: 12px;
   }
@@ -188,6 +188,18 @@
     <h3>Log</h3>
     <input type="text" id="logSearch" placeholder="Search logs..." style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
     <pre id="log" style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Flight Path (Sensor-Based Position)</h3>
+      <div class="tiny hint">pos: <span id="flowPos">0, 0</span> px | delta: <span id="flowDelta">0, 0</span> px</div>
+    </div>
+    <div class="row tiny">
+      <label><input type="checkbox" id="mapReset" />reset on next reading</label>
+      <button onclick="resetMap()" style="padding: 4px 8px; font-size: 12px">Reset Map</button>
+    </div>
+    <canvas id="map"></canvas>
   </div>
 </div>
 
@@ -347,6 +359,253 @@
   const accPlot = new Plot(el("acc"), 4, 600, { minRange: 1, maxRange: 80 });
   const gyrPlot = new Plot(el("gyr"), 4, 600, { minRange: 0.5, maxRange: 80 });
 
+  // map
+  const mapCanvas = el("map");
+  const mapCtx = mapCanvas.getContext("2d");
+  let mapPath = [];
+  let lastAbsoluteX = null;
+  let lastAbsoluteY = null;
+  let startX = null;
+  let startY = null;
+  let mapScale = 1.0;
+  let mapBounds = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+
+  // threshold for detecting jumps (packet loss or network delay)
+  const JUMP_THRESHOLD = 50; // pixels
+
+  function resetMap() {
+    mapPath = [];
+    lastAbsoluteX = null;
+    lastAbsoluteY = null;
+    startX = null;
+    startY = null;
+    mapBounds = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+    http(`/reset/position`).catch(() => {});
+    drawMap();
+  }
+
+  function drawMap() {
+    const rect = mapCanvas.getBoundingClientRect();
+    const w = Math.max(1, Math.floor(rect.width * devicePixelRatio));
+    const h = Math.max(1, Math.floor(rect.height * devicePixelRatio));
+    if (mapCanvas.width !== w || mapCanvas.height !== h) {
+      mapCanvas.width = w;
+      mapCanvas.height = h;
+    }
+    const ctx = mapCtx;
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    if (mapPath.length === 0) {
+      ctx.fillStyle = "#23305a";
+      ctx.font = "12px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("Waiting for sensor data...", rect.width / 2, rect.height / 2);
+      return;
+    }
+
+    // calculate bounds
+    let minX = Infinity,
+      maxX = -Infinity,
+      minY = Infinity,
+      maxY = -Infinity;
+    for (const p of mapPath) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+    mapBounds = { minX, maxX, minY, maxY };
+
+    // calculate actual movement range
+    const rangeX = Math.max(maxX - minX, 0.1); // ensure at least 0.1 to avoid division by zero
+    const rangeY = Math.max(maxY - minY, 0.1);
+
+    // add padding: use larger percentage for smaller movements to ensure visibility
+    // small movements (< 2 pixels) get 50% padding, larger movements get 10% padding
+    const paddingRatioX = rangeX < 2 ? 0.5 : 0.1;
+    const paddingRatioY = rangeY < 2 ? 0.5 : 0.1;
+    const paddingX = Math.max(rangeX * paddingRatioX, 0.5); // absolute minimum 0.5 pixels
+    const paddingY = Math.max(rangeY * paddingRatioY, 0.5);
+
+    // total range with padding
+    const totalRangeX = rangeX + paddingX * 2;
+    const totalRangeY = rangeY + paddingY * 2;
+
+    // calculate center of actual movement
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    // scale to fit with aspect ratio preservation
+    const scaleX = rect.width / totalRangeX;
+    const scaleY = rect.height / totalRangeY;
+    const scale = Math.min(scaleX, scaleY);
+
+    // offset to center the movement
+    const offsetX = rect.width / 2 - centerX * scale;
+    const offsetY = rect.height / 2 - centerY * scale;
+
+    // draw grid with adaptive spacing based on movement range
+    ctx.strokeStyle = "#1f2a4d";
+    ctx.lineWidth = 1;
+
+    // adaptive grid spacing: aim for 8-12 grid lines visible
+    const targetGridLines = 10;
+    const gridSpacingX = totalRangeX / targetGridLines;
+    const gridSpacingY = totalRangeY / targetGridLines;
+
+    // round to nice numbers (powers of 10, or 1/2, 1/5 multipliers)
+    function niceSpacing(spacing) {
+      if (spacing <= 0) return 0.1;
+      const order = Math.pow(10, Math.floor(Math.log10(Math.max(spacing, 0.0001))));
+      const normalized = spacing / order;
+      if (normalized <= 1) return order;
+      if (normalized <= 2) return order * 2;
+      if (normalized <= 5) return order * 5;
+      return order * 10;
+    }
+
+    const niceSpacingX = niceSpacing(gridSpacingX);
+    const niceSpacingY = niceSpacing(gridSpacingY);
+
+    // grid lines in world coordinates
+    const gridStartX = Math.floor((minX - paddingX) / niceSpacingX) * niceSpacingX;
+    const gridEndX = Math.ceil((maxX + paddingX) / niceSpacingX) * niceSpacingX;
+    const gridStartY = Math.floor((minY - paddingY) / niceSpacingY) * niceSpacingY;
+    const gridEndY = Math.ceil((maxY + paddingY) / niceSpacingY) * niceSpacingY;
+
+    for (let gx = gridStartX; gx <= gridEndX; gx += niceSpacingX) {
+      const x = gx * scale + offsetX;
+      if (x >= 0 && x <= rect.width) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, rect.height);
+        ctx.stroke();
+      }
+    }
+    for (let gy = gridStartY; gy <= gridEndY; gy += niceSpacingY) {
+      const y = gy * scale + offsetY;
+      if (y >= 0 && y <= rect.height) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(rect.width, y);
+        ctx.stroke();
+      }
+    }
+
+    // draw axes (at origin if visible, otherwise at center)
+    ctx.strokeStyle = "#33457a";
+    ctx.lineWidth = 1.5;
+    const zeroX = 0 * scale + offsetX;
+    const zeroY = 0 * scale + offsetY;
+
+    // only draw axes if origin is within visible bounds
+    if (zeroX >= 0 && zeroX <= rect.width) {
+      ctx.beginPath();
+      ctx.moveTo(zeroX, 0);
+      ctx.lineTo(zeroX, rect.height);
+      ctx.stroke();
+    }
+    if (zeroY >= 0 && zeroY <= rect.height) {
+      ctx.beginPath();
+      ctx.moveTo(0, zeroY);
+      ctx.lineTo(rect.width, zeroY);
+      ctx.stroke();
+    }
+
+    // draw center lines if origin is not visible
+    if (zeroX < 0 || zeroX > rect.width) {
+      ctx.strokeStyle = "#23305a";
+      ctx.beginPath();
+      ctx.moveTo(rect.width / 2, 0);
+      ctx.lineTo(rect.width / 2, rect.height);
+      ctx.stroke();
+    }
+    if (zeroY < 0 || zeroY > rect.height) {
+      ctx.strokeStyle = "#23305a";
+      ctx.beginPath();
+      ctx.moveTo(0, rect.height / 2);
+      ctx.lineTo(rect.width, rect.height / 2);
+      ctx.stroke();
+    }
+
+    // draw path with jump detection
+    if (mapPath.length > 1) {
+      ctx.strokeStyle = "#68a0ff";
+      ctx.lineWidth = 2;
+
+      let pathStart = 0;
+      for (let i = 1; i < mapPath.length; i++) {
+        const prev = mapPath[i - 1];
+        const curr = mapPath[i];
+
+        // if this is a jump point, draw previous segment and start new one
+        if (curr.jump || prev.jump) {
+          if (i > pathStart + 1) {
+            ctx.beginPath();
+            ctx.moveTo(mapPath[pathStart].x * scale + offsetX, mapPath[pathStart].y * scale + offsetY);
+            for (let j = pathStart + 1; j < i; j++) {
+              ctx.lineTo(mapPath[j].x * scale + offsetX, mapPath[j].y * scale + offsetY);
+            }
+            ctx.stroke();
+          }
+
+          // draw jump indicator (dashed line or different color)
+          if (curr.jump && i > 0) {
+            ctx.beginPath();
+            ctx.setLineDash([5, 5]);
+            ctx.strokeStyle = "#ff8888";
+            ctx.lineWidth = 1;
+            ctx.moveTo(mapPath[i - 1].x * scale + offsetX, mapPath[i - 1].y * scale + offsetY);
+            ctx.lineTo(curr.x * scale + offsetX, curr.y * scale + offsetY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.strokeStyle = "#68a0ff";
+            ctx.lineWidth = 2;
+          }
+
+          pathStart = i;
+        }
+      }
+
+      // draw remaining segment
+      if (mapPath.length > pathStart + 1) {
+        ctx.beginPath();
+        ctx.moveTo(mapPath[pathStart].x * scale + offsetX, mapPath[pathStart].y * scale + offsetY);
+        for (let i = pathStart + 1; i < mapPath.length; i++) {
+          ctx.lineTo(mapPath[i].x * scale + offsetX, mapPath[i].y * scale + offsetY);
+        }
+        ctx.stroke();
+      }
+    }
+
+    // draw start point (origin, if visible)
+    const originX = 0 * scale + offsetX;
+    const originY = 0 * scale + offsetY;
+    if (originX >= 0 && originX <= rect.width && originY >= 0 && originY <= rect.height) {
+      ctx.fillStyle = "#8aff8a";
+      ctx.beginPath();
+      ctx.arc(originX, originY, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // draw current position
+    if (mapPath.length > 0) {
+      const last = mapPath[mapPath.length - 1];
+      const cx = last.x * scale + offsetX;
+      const cy = last.y * scale + offsetY;
+      ctx.fillStyle = "#ff8888";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ff8888";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
   // filters and stats
   const accHpBuf = [
     { prevX: 0, prevY: 0 },
@@ -386,6 +645,73 @@
       // rc status
       el("rc").textContent = d.rc_ok ? "OK" : "LOST";
       el("rc").className = d.rc_ok ? "kbd ok" : "kbd bad";
+
+      // use absolute position state from telemetry (true state, not cumulative)
+      if (d.flow_pos && Array.isArray(d.flow_pos) && d.flow_pos.length >= 2) {
+        const fx = d.flow_pos[0]; // absolute x position
+        const fy = d.flow_pos[1]; // absolute y position
+        el("flowPos").textContent = `${fx.toFixed(1)}, ${fy.toFixed(1)}`;
+
+        // display delta values
+        if (d.flow_delta && Array.isArray(d.flow_delta) && d.flow_delta.length >= 2) {
+          const dx = d.flow_delta[0];
+          const dy = d.flow_delta[1];
+          el("flowDelta").textContent = `${dx.toFixed(2)}, ${dy.toFixed(2)}`;
+        } else {
+          el("flowDelta").textContent = "—";
+        }
+
+        // set start position on first reading or reset
+        if (el("mapReset").checked && startX === null) {
+          startX = fx;
+          startY = fy;
+          mapPath = [];
+          lastAbsoluteX = null;
+          lastAbsoluteY = null;
+        } else if (startX === null) {
+          startX = fx;
+          startY = fy;
+          lastAbsoluteX = fx;
+          lastAbsoluteY = fy;
+        }
+
+        // convert absolute position to relative coordinates for display
+        const relX = fx - startX;
+        const relY = fy - startY;
+
+        // detect jumps (packet loss or network delay)
+        let isJump = false;
+        if (lastAbsoluteX !== null && lastAbsoluteY !== null) {
+          const dx = Math.abs(fx - lastAbsoluteX);
+          const dy = Math.abs(fy - lastAbsoluteY);
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          isJump = distance > JUMP_THRESHOLD;
+        }
+
+        // always add current absolute position to path
+        // if there's a jump, we'll mark it so we can draw it differently
+        const lastPoint = mapPath.length > 0 ? mapPath[mapPath.length - 1] : null;
+        if (!lastPoint || lastPoint.x !== relX || lastPoint.y !== relY || isJump) {
+          if (isJump && lastPoint) {
+            // add discontinuity marker before the jump
+            mapPath.push({ x: lastPoint.x, y: lastPoint.y, jump: true });
+          }
+          mapPath.push({ x: relX, y: relY, jump: isJump });
+          if (mapPath.length > 2000) mapPath.shift();
+        }
+
+        // update last known absolute position
+        lastAbsoluteX = fx;
+        lastAbsoluteY = fy;
+      } else {
+        // show "no data" if flow_pos not available
+        el("flowPos").textContent = "—";
+      }
+
+      // always draw map if we have any data (throttled to ~25 fps like plots)
+      if ((mapPath.length > 0 || startX !== null) && now - lastDraw > 40) {
+        drawMap();
+      }
 
       // raw values
       const axr = d.acc[0],
@@ -512,4 +838,9 @@
   }
   el("logSearch").addEventListener("input", renderLogs);
   pollLogs();
+
+  // redraw map on resize
+  window.addEventListener("resize", () => {
+    if (mapPath.length > 0) drawMap();
+  });
 </script>
