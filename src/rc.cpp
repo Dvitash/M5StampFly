@@ -275,16 +275,16 @@ void handle_telemetry() {
 void handle_logs() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.sendHeader("Cache-Control", "no-cache");
-    
+
     uint32_t last_id = 0;
     if (server.hasArg("last_id")) {
         last_id = server.arg("last_id").toInt();
     }
-    
+
     String json;
     uint32_t new_last_id = last_id;
     serial_logger_get_json(json, new_last_id);
-    
+
     server.send(200, "application/json", json);
 }
 
@@ -300,6 +300,95 @@ void handle_reset_position() {
     server.send(200, "text/plain", "OK");
 }
 
+static bool wait_for_sta_ip(uint32_t timeout_ms) {
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - t0 > timeout_ms) return false;
+        delay(50);
+    }
+    return true;
+}
+
+// proxies the mjpeg stream from 192.168.4.1/v1/stream to /camera/stream
+void handle_camera_stream() {
+    // allow cross-origin
+    WiFiClient client_out = server.client();
+
+    // ensure sta connected to camera ap
+    if (!wait_for_sta_ip(5000)) {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(503, "text/plain", "sta not connected");
+        return;
+    }
+
+    // connect to upstream camera
+    WiFiClient client_in;
+    const char *upstream_host    = "192.168.4.1";
+    const uint16_t upstream_port = 80;
+    if (!client_in.connect(upstream_host, upstream_port)) {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(502, "text/plain", "upstream connect failed");
+        return;
+    }
+
+    // issue the single long-lived request
+    print(
+        "GET /v1/stream HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        upstream_host);
+
+    // try to read upstream headers; fall back if none detected
+    String content_type = "multipart/x-mixed-replace; boundary=--frame";
+    bool got_headers    = false;
+    uint32_t t0         = millis();
+    while (client_in.connected() && millis() - t0 < 3000) {
+        String line = client_in.readStringUntil('\n');
+        if (line.length() == 0) break;
+        if (line == "\r" || line == "\n") {
+            got_headers = true;
+            break;
+        }
+        if (line.startsWith("Content-Type:")) {
+            int idx = line.indexOf(':');
+            if (idx >= 0) {
+                String v = line.substring(idx + 1);
+                v.trim();
+                if (v.length()) content_type = v;
+            }
+        }
+    }
+
+    // send downstream response headers once
+    print(
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        content_type.c_str());
+
+    // if no headers came from upstream, keep what we sent and start pumping raw bytes
+    uint8_t buf[1460];
+    while (client_out.connected()) {
+        int n = client_in.read(buf, sizeof(buf));
+        if (n > 0) {
+            size_t w = client_out.write(buf, n);
+            if (w == 0) break;
+        } else if (!client_in.connected() && !client_in.available()) {
+            break;
+        } else {
+            delay(1);
+        }
+        // feed watchdogs implicitly; keep loop tight and non-blocking
+    }
+
+    client_in.stop();
+    client_out.stop();
+}
+
 void rc_init(void) {
     // Initialize Stick list
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
@@ -312,7 +401,8 @@ void rc_init(void) {
     // USBSerial.printf("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
     //                  MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
 
-    WiFi.mode(WIFI_AP);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin("UnitCamS3-WiFi", "");
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, 1);
 
     serial_logger_usb_println("Access Point started!");
@@ -320,8 +410,8 @@ void rc_init(void) {
     serial_logger_usb_println(WiFi.softAPIP().toString());
 
     WiFi.macAddress((uint8_t *)MyMacAddr);
-    print("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
-                     MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+    print("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3],
+          MyMacAddr[4], MyMacAddr[5]);
 
     if (esp_now_init() == ESP_OK) {
         serial_logger_usb_println("ESPNow Init Success");
@@ -374,6 +464,7 @@ void rc_init(void) {
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
     server.on("/reset/position", HTTP_GET, handle_reset_position);
+    server.on("/camera/stream", HTTP_GET, handle_camera_stream);
 
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
