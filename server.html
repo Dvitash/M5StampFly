@@ -200,21 +200,6 @@
     </div>
     <canvas id="map"></canvas>
   </div>
-
-  <div class="card">
-    <h3>Camera Stream</h3>
-    <div class="row tiny">
-      <label><input type="checkbox" id="cameraEnabled" checked />enable stream</label>
-      <button onclick="toggleCamera()" style="padding: 4px 8px; font-size: 12px">Toggle Camera</button>
-      <span id="cameraStatus" class="tiny hint">connecting...</span>
-    </div>
-    <div id="cameraContainer" style="position: relative; width: 100%; height: 220px; background: #0d1328; border-radius: 8px; overflow: hidden;">
-      <img id="cameraStream" style="width: 100%; height: 100%; object-fit: contain; display: none;" alt="Camera stream" />
-      <div id="cameraPlaceholder" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #666; font-size: 14px;">
-        Camera disabled
-      </div>
-    </div>
-  </div>
 </div>
 
 <script>
