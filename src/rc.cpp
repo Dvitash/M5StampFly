@@ -38,6 +38,159 @@ extern volatile float gyro_x, gyro_y, gyro_z;
 extern volatile float current_x, current_y;
 
 WebServer server(80);
+static WiFiServer cameraServer(81);
+
+static void camera_stream_task(void *param);
+
+void start_camera_stream_server() {
+    // start listening on port 81
+    cameraServer.begin();
+    cameraServer.setNoDelay(true);
+
+    // spawn a task that accepts clients and spawns a worker per client
+    xTaskCreatePinnedToCore(camera_stream_task,  // task function
+                            "cam_stream_task",   // name
+                            6144,                // stack
+                            nullptr,             // param
+                            1,                   // priority
+                            nullptr,             // handle
+                            0                    // core 0 (leave core 1 for wifi/arduino)
+    );
+}
+
+static bool wait_for_sta_ip(uint32_t timeout_ms) {
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - t0 > timeout_ms) return false;
+        delay(50);
+        yield();
+    }
+    return true;
+}
+
+static void handle_one_camera_client(WiFiClient client_out) {
+    client_out.setTimeout(2000);
+
+    // Parse request line to preserve query string (and to drain headers)
+    String reqLine = client_out.readStringUntil('\n');  // "GET /camera/stream?... HTTP/1.1"
+    if (reqLine.length() == 0) {
+        client_out.stop();
+        return;
+    }
+    // Drain the rest of the headers quickly
+    unsigned long tdrain = millis();
+    while (millis() - tdrain < 500) {
+        String l = client_out.readStringUntil('\n');
+        if (l.length() == 0 || l == "\r") break;
+    }
+
+    // Extract query (optional)
+    String qs;
+    int sp1 = reqLine.indexOf(' ');
+    int sp2 = reqLine.indexOf(' ', sp1 + 1);
+    if (sp1 > 0 && sp2 > sp1) {
+        String path = reqLine.substring(sp1 + 1, sp2);
+        int q       = path.indexOf('?');
+        if (q >= 0) qs = path.substring(q);  // includes '?'
+    }
+
+    if (!wait_for_sta_ip(8000)) {
+        client_out.print(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nsta not "
+            "connected");
+        client_out.stop();
+        return;
+    }
+
+    WiFiClient client_in;
+    client_in.setTimeout(2000);  // IMPORTANT: avoid header read hang
+    if (!client_in.connect(IPAddress(192, 168, 4, 1), 80)) {
+        client_out.print(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nupstream connect failed");
+        client_out.stop();
+        return;
+    }
+
+    // Use the camera’s MJPEG endpoint. Keep any cache-buster query.
+    String upstream = "/api/v1/stream";
+    upstream += qs;  // if any
+
+    client_in.print("GET ");
+    client_in.print(upstream);
+    client_in.print(" HTTP/1.1\r\n");
+    client_in.print("Host: 192.168.4.1\r\n");
+    client_in.print("Accept: multipart/x-mixed-replace,image/*,*/*;q=0.8\r\n");
+    client_in.print("Connection: close\r\n\r\n");
+
+    // Read status line
+    String status = client_in.readStringUntil('\n');
+    status.trim();
+    if (!status.startsWith("HTTP/1.1 200") && !status.startsWith("HTTP/1.0 200")) {
+        client_out.print("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n");
+        client_out.print("bad camera status: ");
+        client_out.print(status);
+        client_in.stop();
+        client_out.stop();
+        return;
+    }
+
+    // Headers: capture Content-Type
+    String content_type = "multipart/x-mixed-replace; boundary=--frame";
+    unsigned long th    = millis();
+    for (;;) {
+        String h = client_in.readStringUntil('\n');
+        if (h.length() == 0) break;
+        h.trim();
+        if (h.length() == 0) break;
+        if (h.startsWith("Content-Type:")) {
+            int c = h.indexOf(':');
+            if (c >= 0) {
+                content_type = h.substring(c + 1);
+                content_type.trim();
+            }
+        }
+        if (millis() - th > 2000) break;
+    }
+
+    // Respond to browser
+    client_out.print("HTTP/1.1 200 OK\r\n");
+    client_out.print("Content-Type: ");
+    client_out.print(content_type);
+    client_out.print("\r\n");
+    client_out.print("Access-Control-Allow-Origin: *\r\n");
+    client_out.print("Cache-Control: no-cache\r\n");
+    client_out.print("Connection: close\r\n\r\n");
+
+    // Pump bytes
+    uint8_t buf[1460];
+    for (;;) {
+        int n = client_in.read(buf, sizeof(buf));
+        if (n > 0) {
+            if (client_out.write(buf, n) == 0) break;
+        } else {
+            if (!client_in.connected() && !client_in.available()) break;
+            vTaskDelay(1);
+        }
+        if (!client_out.connected()) break;
+    }
+
+    client_in.stop();
+    client_out.stop();
+}
+
+static void camera_stream_task(void *param) {
+    for (;;) {
+        WiFiClient client = cameraServer.available();
+        if (client) {
+            // Peek first bytes to ensure this is a GET, else drop quickly
+            client.setTimeout(2000);
+            // We hand off to handler which also parses headers
+            handle_one_camera_client(std::move(client));
+        } else {
+            vTaskDelay(5);
+        }
+    }
+}
 
 // esp_now_peer_info_t slave;
 
@@ -300,169 +453,62 @@ void handle_reset_position() {
     server.send(200, "text/plain", "OK");
 }
 
-static bool wait_for_sta_ip(uint32_t timeout_ms) {
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-        if (millis() - t0 > timeout_ms) return false;
-        delay(50);
-    }
-    return true;
-}
-
-// Proxies the MJPEG stream from camera to client using chunked transfer encoding
-// This allows other server operations to continue while streaming
-void handle_camera_stream() {
-    // Send headers for chunked response
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Cache-Control", "no-cache");
-    server.sendHeader("Connection", "close");
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN); // Chunked transfer
-    server.send(200, "multipart/x-mixed-replace; boundary=--frame", "");
-
-    WiFiClient client = server.client();
-
-    // Ensure STA is connected to camera AP
-    if (!wait_for_sta_ip(5000)) {
-        server.sendContent("--frame\r\nContent-Type: text/plain\r\n\r\nCamera not available\r\n--frame--\r\n");
-        return;
-    }
-
-    // Connect to camera
-    WiFiClient camera_client;
-    if (!camera_client.connect("192.168.4.1", 80)) {
-        server.sendContent("--frame\r\nContent-Type: text/plain\r\n\r\nCamera connection failed\r\n--frame--\r\n");
-        return;
-    }
-
-    // Send request to camera
-    camera_client.print("GET /v1/stream HTTP/1.1\r\n");
-    camera_client.print("Host: 192.168.4.1\r\n");
-    camera_client.print("Connection: close\r\n");
-    camera_client.print("\r\n");
-
-    // Skip camera headers
-    uint32_t start_time = millis();
-    bool headers_done = false;
-    while (camera_client.connected() && !headers_done && millis() - start_time < 3000) {
-        if (camera_client.available()) {
-            String line = camera_client.readStringUntil('\n');
-            if (line == "\r" || line == "\n") {
-                headers_done = true;
-            }
-        }
-        // Yield to allow other server operations
-        server.handleClient();
-        delay(1);
-    }
-
-    // Stream data in chunks, yielding control periodically
-    uint8_t buf[512]; // Smaller buffer for better responsiveness
-    uint32_t last_yield = millis();
-    start_time = millis();
-
-    while (client.connected() && camera_client.connected() && millis() - start_time < 30000) {
-        // Read available data from camera
-        int available = camera_client.available();
-        if (available > 0) {
-            int to_read = min(available, (int)sizeof(buf));
-            int n = camera_client.read(buf, to_read);
-
-            if (n > 0) {
-                // Send in smaller chunks to allow yielding
-                int sent = 0;
-                while (sent < n && client.connected()) {
-                    int chunk_size = min(128, n - sent); // Small chunks
-                    size_t written = client.write(&buf[sent], chunk_size);
-                    if (written == 0) break;
-                    sent += written;
-
-                    // Yield every 5ms to allow other server operations
-                    if (millis() - last_yield > 5) {
-                        server.handleClient();
-                        last_yield = millis();
-                    }
-                }
-            }
-        } else {
-            // No data available, yield control
-            server.handleClient();
-            delay(1);
-        }
-    }
-
-    // Send closing boundary
-    if (client.connected()) {
-        client.print("\r\n--frame--\r\n");
-    }
-
-    camera_client.stop();
-}
-
+// update your rc_init() to start the separate camera server
 void rc_init(void) {
-    // Initialize Stick list
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
-
-    // ESP-NOW初期化
-    // WiFi.mode(WIFI_STA);
-    // WiFi.disconnect();
-
-    // WiFi.macAddress((uint8_t *)MyMacAddr);
-    // USBSerial.printf("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2],
-    //                  MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
 
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin("UnitCamS3-WiFi", "");
-    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, 1);
+    WiFi.softAPConfig(IPAddress(10, 0, 0, 1), IPAddress(10, 0, 0, 1), IPAddress(255, 255, 255, 0));
+    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
 
     serial_logger_usb_println("Access Point started!");
-    serial_logger_usb_print("IP address: ");
+    serial_logger_usb_print("AP IP: ");
     serial_logger_usb_println(WiFi.softAPIP().toString());
 
     WiFi.macAddress((uint8_t *)MyMacAddr);
     print("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3],
           MyMacAddr[4], MyMacAddr[5]);
 
-    if (esp_now_init() == ESP_OK) {
-        serial_logger_usb_println("ESPNow Init Success");
-    } else {
+    if (esp_now_init() != ESP_OK) {
         serial_logger_usb_println("ESPNow Init Failed");
         ESP.restart();
     }
 
-    // MACアドレスブロードキャスト
     uint8_t addr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     memcpy(peerInfo.peer_addr, addr, 6);
-    peerInfo.channel = CHANNEL;
     peerInfo.encrypt = false;
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
         serial_logger_usb_println("Failed to add peer");
         return;
     }
-    esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-    // Send my MAC address
     for (uint16_t i = 0; i < 50; i++) {
         send_peer_info();
         delay(50);
         print("%d\n", i);
     }
 
-    // ESP-NOW再初期化
-    // WiFi.mode(WIFI_STA);
-    // WiFi.disconnect();
-    if (esp_now_init() == ESP_OK) {
-        serial_logger_usb_println("ESPNow Init Success2");
-    } else {
+    if (esp_now_init() != ESP_OK) {
         serial_logger_usb_println("ESPNow Init Failed2");
         ESP.restart();
     }
-
-    // ESP-NOWコールバック登録
     esp_now_register_recv_cb(OnDataRecv);
     serial_logger_usb_println("ESP-NOW Ready.");
 
+    // sync channel with joined AP if available
+    if (wait_for_sta_ip(8000)) {
+        wifi_ap_record_t apinfo{};
+        if (esp_wifi_sta_get_ap_info(&apinfo) == ESP_OK) {
+            esp_wifi_set_channel(apinfo.primary, WIFI_SECOND_CHAN_NONE);
+            serial_logger_usb_print("Synced WiFi channel to ");
+            serial_logger_usb_println(String(apinfo.primary));
+        }
+    }
+
     serial_logger_init();
 
+    // normal api continues on port 80, non-blocking
     server.on("/buzz/start", HTTP_GET, startBuzz);
     server.on("/buzz/stop", HTTP_GET, stopBuzz);
     server.on("/land", HTTP_GET, auto_land);
@@ -473,7 +519,6 @@ void rc_init(void) {
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
     server.on("/reset/position", HTTP_GET, handle_reset_position);
-    server.on("/camera/stream", HTTP_GET, handle_camera_stream);
 
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
@@ -485,9 +530,17 @@ void rc_init(void) {
     server.on("/ping", HTTP_OPTIONS, handle_options);
     server.on("/reset/position", HTTP_OPTIONS, handle_options);
 
-    // server.on("/move", handle_movement);
-    // server.on("/move/stop", handle_stop);
+    server.on("/camera/stream", HTTP_GET, []() {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        String loc = "http://" + WiFi.softAPIP().toString() + ":81/stream";
+        server.sendHeader("Location", loc);
+        server.send(302);
+    });
+
     server.begin();
+
+    // start the separate camera server on port 81 so webserver never blocks
+    start_camera_stream_server();
 }
 
 void send_peer_info(void) {

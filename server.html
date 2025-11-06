@@ -94,6 +94,10 @@
     font-size: 12px;
     opacity: 0.9;
   }
+  .card.disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
   label {
     display: inline-flex;
     align-items: center;
@@ -127,7 +131,10 @@
 <div class="grid">
   <div class="card">
     <div class="row" style="justify-content: space-between; align-items: baseline">
-      <h3 style="margin: 0">Accelerometer (m/s²)</h3>
+      <div class="row" style="align-items: center; gap: 8px">
+        <h3 style="margin: 0">Accelerometer (m/s²)</h3>
+        <label style="font-size: 12px"><input type="checkbox" id="telemetryEnabled" checked />enable</label>
+      </div>
       <div class="tiny hint">mode: <span id="accMode">high-pass</span> • autoscale</div>
     </div>
     <div class="row tiny">
@@ -184,7 +191,10 @@
   </div>
 
   <div class="card">
-    <h3>Log</h3>
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Log</h3>
+      <label style="font-size: 12px"><input type="checkbox" id="logEnabled" checked />enable polling</label>
+    </div>
     <input type="text" id="logSearch" placeholder="Search logs..." style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
     <pre id="log" style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
   </div>
@@ -218,7 +228,7 @@
 
 <script>
   // http helpers
-  const host = location.host || "192.168.4.1";
+  const host = location.host || "10.0.0.1";
   document.getElementById("host").textContent = host || "(set)";
   const http = (p, opt = {}) => fetch(`http://${host}${p}`, opt);
 
@@ -639,6 +649,12 @@
     lastFpsMark = performance.now(),
     frames = 0;
   async function poll() {
+    // Skip polling if telemetry is disabled
+    if (!el("telemetryEnabled").checked) {
+      setTimeout(poll, 50);
+      return;
+    }
+
     try {
       const r = await http(`/telemetry`);
       if (!r.ok) throw 0;
@@ -807,6 +823,26 @@
     .then((t) => log("ping: " + t))
     .catch(() => log("ping failed"));
 
+  // checkbox handlers
+  function updateCardStates() {
+    // Telemetry affects accelerometer, gyroscope, and flight path cards
+    const telemetryEnabled = el("telemetryEnabled").checked;
+    el("acc").parentElement.classList.toggle("disabled", !telemetryEnabled);
+    el("gyr").parentElement.classList.toggle("disabled", !telemetryEnabled);
+    el("map").parentElement.classList.toggle("disabled", !telemetryEnabled);
+
+    // Log card
+    const logEnabled = el("logEnabled").checked;
+    el("log").parentElement.classList.toggle("disabled", !logEnabled);
+
+    // Camera card already handled by existing code
+  }
+
+  // setup checkbox listeners
+  el("telemetryEnabled").addEventListener("change", updateCardStates);
+  el("logEnabled").addEventListener("change", updateCardStates);
+  updateCardStates(); // initial state
+
   // log polling
   let lastLogId = 0;
   let allLogs = [];
@@ -827,6 +863,12 @@
     L.scrollTop = L.scrollHeight;
   }
   async function pollLogs() {
+    // Skip polling if logs are disabled
+    if (!el("logEnabled").checked) {
+      setTimeout(pollLogs, 100);
+      return;
+    }
+
     try {
       const r = await http(`/logs?last_id=${lastLogId}`);
       if (!r.ok) throw 0;
@@ -847,7 +889,7 @@
     } catch (e) {
       /* best effort */
     }
-    setTimeout(pollLogs, (1 / 400) * 1000);
+    setTimeout(pollLogs, 100);
   }
   el("logSearch").addEventListener("input", renderLogs);
   pollLogs();
@@ -860,6 +902,7 @@
   // camera streaming
   let cameraStreamActive = false;
   let cameraRetryTimeout = null;
+  let cameraPollTimeout = null;
   let cameraEventSource = null;
   const cameraImg = el("cameraStream");
   const cameraContainer = el("cameraContainer");
@@ -889,57 +932,31 @@
   }
 
   function startCameraStream() {
-    if (!cameraEnabled.checked || cameraStreamActive) return;
-
-    cameraStreamActive = true;
-    updateCameraDisplay();
-
-    // set src to trigger MJPEG stream - browsers handle multipart responses well with img tags
-    cameraImg.src = `http://${host}/camera/stream?t=${Date.now()}`;
-
-    // handle stream loading
     cameraImg.onload = () => {
-      cameraStreamActive = true;
-      updateCameraDisplay();
-      log("camera stream started");
+      cameraStatus.textContent = "streaming";
+      cameraImg.style.display = "block";
+      cameraPlaceholder.style.display = "none";
     };
-
     cameraImg.onerror = () => {
-      cameraStreamActive = false;
-      updateCameraDisplay();
-      log("camera stream failed, retrying...");
-      // retry after 2 seconds
-      cameraRetryTimeout = setTimeout(startCameraStream, 2000);
+      cameraStatus.textContent = "error";
+      cameraImg.style.display = "none";
+      cameraPlaceholder.style.display = "block";
     };
+    // one request only, no timers
+    cameraImg.src = `http://${host}/camera/stream`;
+    cameraStatus.textContent = "connecting...";
   }
 
   function stopCameraStream() {
-    cameraStreamActive = false;
-    if (cameraRetryTimeout) {
-      clearTimeout(cameraRetryTimeout);
-      cameraRetryTimeout = null;
-    }
-    if (cameraImg.src.startsWith("blob:")) {
-      URL.revokeObjectURL(cameraImg.src);
-    }
+    // break the connection by navigating to an empty data url
     cameraImg.src = "";
-    updateCameraDisplay();
-    log("camera stream stopped");
+    cameraImg.style.display = "none";
+    cameraPlaceholder.style.display = "block";
+    cameraStatus.textContent = "disabled";
   }
 
-  function toggleCamera() {
-    if (cameraEnabled.checked) {
-      startCameraStream();
-    } else {
-      stopCameraStream();
-    }
-  }
-
-  // camera control events
-  cameraEnabled.addEventListener("change", toggleCamera);
-
-  // start camera if enabled by default
-  if (cameraEnabled.checked) {
-    setTimeout(startCameraStream, 1000); // delay to let page load
-  }
+  cameraEnabled.addEventListener("change", () => {
+    if (cameraEnabled.checked) startCameraStream();
+    else stopCameraStream();
+  });
 </script>
