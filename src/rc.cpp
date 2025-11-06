@@ -309,84 +309,93 @@ static bool wait_for_sta_ip(uint32_t timeout_ms) {
     return true;
 }
 
-// proxies the mjpeg stream from 192.168.4.1/v1/stream to /camera/stream
+// Proxies the MJPEG stream from camera to client using chunked transfer encoding
+// This allows other server operations to continue while streaming
 void handle_camera_stream() {
-    // allow cross-origin
-    WiFiClient client_out = server.client();
+    // Send headers for chunked response
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.sendHeader("Connection", "close");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN); // Chunked transfer
+    server.send(200, "multipart/x-mixed-replace; boundary=--frame", "");
 
-    // ensure sta connected to camera ap
+    WiFiClient client = server.client();
+
+    // Ensure STA is connected to camera AP
     if (!wait_for_sta_ip(5000)) {
-        server.sendHeader("Access-Control-Allow-Origin", "*");
-        server.send(503, "text/plain", "sta not connected");
+        server.sendContent("--frame\r\nContent-Type: text/plain\r\n\r\nCamera not available\r\n--frame--\r\n");
         return;
     }
 
-    // connect to upstream camera
-    WiFiClient client_in;
-    const char *upstream_host    = "192.168.4.1";
-    const uint16_t upstream_port = 80;
-    if (!client_in.connect(upstream_host, upstream_port)) {
-        server.sendHeader("Access-Control-Allow-Origin", "*");
-        server.send(502, "text/plain", "upstream connect failed");
+    // Connect to camera
+    WiFiClient camera_client;
+    if (!camera_client.connect("192.168.4.1", 80)) {
+        server.sendContent("--frame\r\nContent-Type: text/plain\r\n\r\nCamera connection failed\r\n--frame--\r\n");
         return;
     }
 
-    // issue the single long-lived request
-    print(
-        "GET /v1/stream HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        upstream_host);
+    // Send request to camera
+    camera_client.print("GET /v1/stream HTTP/1.1\r\n");
+    camera_client.print("Host: 192.168.4.1\r\n");
+    camera_client.print("Connection: close\r\n");
+    camera_client.print("\r\n");
 
-    // try to read upstream headers; fall back if none detected
-    String content_type = "multipart/x-mixed-replace; boundary=--frame";
-    bool got_headers    = false;
-    uint32_t t0         = millis();
-    while (client_in.connected() && millis() - t0 < 3000) {
-        String line = client_in.readStringUntil('\n');
-        if (line.length() == 0) break;
-        if (line == "\r" || line == "\n") {
-            got_headers = true;
-            break;
-        }
-        if (line.startsWith("Content-Type:")) {
-            int idx = line.indexOf(':');
-            if (idx >= 0) {
-                String v = line.substring(idx + 1);
-                v.trim();
-                if (v.length()) content_type = v;
+    // Skip camera headers
+    uint32_t start_time = millis();
+    bool headers_done = false;
+    while (camera_client.connected() && !headers_done && millis() - start_time < 3000) {
+        if (camera_client.available()) {
+            String line = camera_client.readStringUntil('\n');
+            if (line == "\r" || line == "\n") {
+                headers_done = true;
             }
         }
+        // Yield to allow other server operations
+        server.handleClient();
+        delay(1);
     }
 
-    // send downstream response headers once
-    print(
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Cache-Control: no-cache\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        content_type.c_str());
+    // Stream data in chunks, yielding control periodically
+    uint8_t buf[512]; // Smaller buffer for better responsiveness
+    uint32_t last_yield = millis();
+    start_time = millis();
 
-    // if no headers came from upstream, keep what we sent and start pumping raw bytes
-    uint8_t buf[1460];
-    while (client_out.connected()) {
-        int n = client_in.read(buf, sizeof(buf));
-        if (n > 0) {
-            size_t w = client_out.write(buf, n);
-            if (w == 0) break;
-        } else if (!client_in.connected() && !client_in.available()) {
-            break;
+    while (client.connected() && camera_client.connected() && millis() - start_time < 30000) {
+        // Read available data from camera
+        int available = camera_client.available();
+        if (available > 0) {
+            int to_read = min(available, (int)sizeof(buf));
+            int n = camera_client.read(buf, to_read);
+
+            if (n > 0) {
+                // Send in smaller chunks to allow yielding
+                int sent = 0;
+                while (sent < n && client.connected()) {
+                    int chunk_size = min(128, n - sent); // Small chunks
+                    size_t written = client.write(&buf[sent], chunk_size);
+                    if (written == 0) break;
+                    sent += written;
+
+                    // Yield every 5ms to allow other server operations
+                    if (millis() - last_yield > 5) {
+                        server.handleClient();
+                        last_yield = millis();
+                    }
+                }
+            }
         } else {
+            // No data available, yield control
+            server.handleClient();
             delay(1);
         }
-        // feed watchdogs implicitly; keep loop tight and non-blocking
     }
 
-    client_in.stop();
-    client_out.stop();
+    // Send closing boundary
+    if (client.connected()) {
+        client.print("\r\n--frame--\r\n");
+    }
+
+    camera_client.stop();
 }
 
 void rc_init(void) {
