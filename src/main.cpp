@@ -27,6 +27,7 @@
 #include <FastLED.h>
 #include "flight_control.hpp"
 #include <buzzer.h>
+#include "rc.hpp"
 
 // VL53L0X_ADDRESS           0x29
 // MPU6886_ADDRESS           0x68

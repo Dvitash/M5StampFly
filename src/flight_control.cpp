@@ -343,7 +343,9 @@ void loop_400Hz(void) {
     static uint8_t led = 1;
     float sense_time;
     // 割り込みにより400Hzで以降のコードが実行
-    while (Loop_flag == 0);
+    while (Loop_flag == 0) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    };
     Loop_flag = 0;
 
     E_time           = micros();
@@ -359,7 +361,7 @@ void loop_400Hz(void) {
     // LED Drive
     led_drive();
 
-    handleClient();
+    // webserver now runs in separate task - no need to call here
 
     if (Mode > AVERAGE_MODE) {
         int16_t deltaX = 0, deltaY = 0;
@@ -746,7 +748,7 @@ void get_command(void) {
 
         // Position hold correction (add to stick-based commands)
         if (PositionHold_flag == 1 && Mode == FLIGHT_MODE) {
-            float pos_x_err          = target_x - current_x;
+            float pos_x_err          = -(target_x - current_x);
             float pos_y_err          = target_y - current_y;
             float distance_magnitude = sqrt(pos_x_err * pos_x_err + pos_y_err * pos_y_err);
 

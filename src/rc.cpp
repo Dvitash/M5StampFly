@@ -38,6 +38,16 @@ extern volatile float gyro_x, gyro_y, gyro_z;
 extern volatile float current_x, current_y;
 
 WebServer server(80);
+
+// webserver task to handle http requests independently
+static void webserver_task(void *param) {
+    for (;;) {
+        server.handleClient();
+        // small delay to yield but keep responsiveness high
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
 static WiFiServer cameraServer(81);
 
 static void camera_stream_task(void *param);
@@ -48,11 +58,12 @@ void start_camera_stream_server() {
     cameraServer.setNoDelay(true);
 
     // spawn a task that accepts clients and spawns a worker per client
+    // lower priority (0) to avoid interfering with main webserver
     xTaskCreatePinnedToCore(camera_stream_task,  // task function
                             "cam_stream_task",   // name
                             6144,                // stack
                             nullptr,             // param
-                            1,                   // priority
+                            0,                   // priority (lower than main loop)
                             nullptr,             // handle
                             0                    // core 0 (leave core 1 for wifi/arduino)
     );
@@ -68,13 +79,17 @@ static bool wait_for_sta_ip(uint32_t timeout_ms) {
     return true;
 }
 
-static void handle_one_camera_client(WiFiClient client_out) {
+static void handle_one_camera_client_task(void *param) {
+    WiFiClient client_out = *static_cast<WiFiClient *>(param);
+    delete static_cast<WiFiClient *>(param);
+
     client_out.setTimeout(2000);
 
     // Parse request line to preserve query string (and to drain headers)
-    String reqLine = client_out.readStringUntil('\n');  // "GET /camera/stream?... HTTP/1.1"
+    String reqLine = client_out.readStringUntil('\n');
     if (reqLine.length() == 0) {
         client_out.stop();
+        vTaskDelete(nullptr);
         return;
     }
     // Drain the rest of the headers quickly
@@ -82,6 +97,7 @@ static void handle_one_camera_client(WiFiClient client_out) {
     while (millis() - tdrain < 500) {
         String l = client_out.readStringUntil('\n');
         if (l.length() == 0 || l == "\r") break;
+        vTaskDelay(1);
     }
 
     // Extract query (optional)
@@ -91,29 +107,31 @@ static void handle_one_camera_client(WiFiClient client_out) {
     if (sp1 > 0 && sp2 > sp1) {
         String path = reqLine.substring(sp1 + 1, sp2);
         int q       = path.indexOf('?');
-        if (q >= 0) qs = path.substring(q);  // includes '?'
+        if (q >= 0) qs = path.substring(q);
     }
 
-    if (!wait_for_sta_ip(8000)) {
+    // reduce timeout to avoid blocking main server - check quickly and fail fast
+    if (!wait_for_sta_ip(500)) {
         client_out.print(
             "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nsta not "
             "connected");
         client_out.stop();
+        vTaskDelete(nullptr);
         return;
     }
 
     WiFiClient client_in;
-    client_in.setTimeout(2000);  // IMPORTANT: avoid header read hang
+    client_in.setTimeout(2000);
     if (!client_in.connect(IPAddress(192, 168, 4, 1), 80)) {
         client_out.print(
             "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nupstream connect failed");
         client_out.stop();
+        vTaskDelete(nullptr);
         return;
     }
 
-    // Use the camera’s MJPEG endpoint. Keep any cache-buster query.
     String upstream = "/api/v1/stream";
-    upstream += qs;  // if any
+    upstream += qs;
 
     client_in.print("GET ");
     client_in.print(upstream);
@@ -122,7 +140,6 @@ static void handle_one_camera_client(WiFiClient client_out) {
     client_in.print("Accept: multipart/x-mixed-replace,image/*,*/*;q=0.8\r\n");
     client_in.print("Connection: close\r\n\r\n");
 
-    // Read status line
     String status = client_in.readStringUntil('\n');
     status.trim();
     if (!status.startsWith("HTTP/1.1 200") && !status.startsWith("HTTP/1.0 200")) {
@@ -131,10 +148,10 @@ static void handle_one_camera_client(WiFiClient client_out) {
         client_out.print(status);
         client_in.stop();
         client_out.stop();
+        vTaskDelete(nullptr);
         return;
     }
 
-    // Headers: capture Content-Type
     String content_type = "multipart/x-mixed-replace; boundary=--frame";
     unsigned long th    = millis();
     for (;;) {
@@ -150,9 +167,9 @@ static void handle_one_camera_client(WiFiClient client_out) {
             }
         }
         if (millis() - th > 2000) break;
+        vTaskDelay(1);
     }
 
-    // Respond to browser
     client_out.print("HTTP/1.1 200 OK\r\n");
     client_out.print("Content-Type: ");
     client_out.print(content_type);
@@ -161,8 +178,9 @@ static void handle_one_camera_client(WiFiClient client_out) {
     client_out.print("Cache-Control: no-cache\r\n");
     client_out.print("Connection: close\r\n\r\n");
 
-    // Pump bytes
+    // Pump bytes with frequent yields to allow main server to process requests
     uint8_t buf[1460];
+    uint32_t lastYield = millis();
     for (;;) {
         int n = client_in.read(buf, sizeof(buf));
         if (n > 0) {
@@ -172,22 +190,37 @@ static void handle_one_camera_client(WiFiClient client_out) {
             vTaskDelay(1);
         }
         if (!client_out.connected()) break;
+
+        // yield every 10ms to allow main server to handle requests
+        if (millis() - lastYield > 10) {
+            vTaskDelay(1);
+            lastYield = millis();
+        }
     }
 
     client_in.stop();
     client_out.stop();
+    vTaskDelete(nullptr);
+}
+
+static void handle_one_camera_client(WiFiClient client_out) {
+    // spawn each client in its own task to avoid blocking the main camera task
+    WiFiClient *client_copy = new WiFiClient(std::move(client_out));
+    if (xTaskCreatePinnedToCore(handle_one_camera_client_task, "cam_client", 8192, client_copy, 0, nullptr, 0) !=
+        pdPASS) {
+        // task creation failed, clean up
+        client_copy->stop();
+        delete client_copy;
+    }
 }
 
 static void camera_stream_task(void *param) {
     for (;;) {
         WiFiClient client = cameraServer.available();
         if (client) {
-            // Peek first bytes to ensure this is a GET, else drop quickly
-            client.setTimeout(2000);
-            // We hand off to handler which also parses headers
             handle_one_camera_client(std::move(client));
         } else {
-            vTaskDelay(5);
+            vTaskDelay(10);  // yield more frequently to allow main server
         }
     }
 }
@@ -389,40 +422,14 @@ void handle_telemetry() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.sendHeader("Cache-Control", "no-cache");
 
-    imu_update();
-
-    String mac = String(MyMacAddr[0], 16) + ":" + String(MyMacAddr[1], 16) + ":" + String(MyMacAddr[2], 16) + ":" +
-                 String(MyMacAddr[3], 16) + ":" + String(MyMacAddr[4], 16) + ":" + String(MyMacAddr[5], 16);
-    String j;
-    j.reserve(256);
-    j += '{';
-    j += "\"t_us\":";
-    j += String((uint32_t)micros());
-    j += ",\"acc\":[";
-    j += String(acc_x, 6);
-    j += ',';
-    j += String(acc_y, 6);
-    j += ',';
-    j += String(acc_z, 6);
-    j += ']';
-    j += ",\"gyro\":[";
-    j += String(gyro_x, 6);
-    j += ',';
-    j += String(gyro_y, 6);
-    j += ',';
-    j += String(gyro_z, 6);
-    j += ']';
-    j += ",\"rc_ok\":";
-    j += rc_isconnected() ? "true" : "false";
-    j += ",\"flow_pos\":[";
-    j += String(current_x, 2);
-    j += ',';
-    j += String(current_y, 2);
-    j += ']';
-    j += ",\"mac\":\"";
-    j += mac;
-    j += "\"}";
-    server.send(200, "application/json", j);
+    // use cached imu values updated in main loop - no need to read spi here
+    char json[320];
+    snprintf(json, sizeof(json),
+             "{\"t_us\":%u,\"acc\":[%.6f,%.6f,%.6f],\"gyro\":[%.6f,%.6f,%.6f],\"rc_ok\":%s,\"flow_pos\":[%.2f,%.2f],"
+             "\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"}",
+             (uint32_t)micros(), acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, rc_isconnected() ? "true" : "false",
+             current_x, current_y, MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+    server.send(200, "application/json", json);
 }
 
 void handle_logs() {
@@ -453,7 +460,6 @@ void handle_reset_position() {
     server.send(200, "text/plain", "OK");
 }
 
-// update your rc_init() to start the separate camera server
 void rc_init(void) {
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
 
@@ -539,7 +545,10 @@ void rc_init(void) {
 
     server.begin();
 
-    // start the separate camera server on port 81 so webserver never blocks
+    // start webserver in separate task so it doesn't block control loop
+    xTaskCreatePinnedToCore(webserver_task, "webserver", 8192, nullptr, 1, nullptr, 1);
+
+    // // start the separate camera server on port 81 so webserver never blocks
     start_camera_stream_server();
 }
 
