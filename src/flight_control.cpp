@@ -129,32 +129,19 @@ volatile float current_y               = 0;
 volatile float target_y                = 0;
 constexpr float MARGIN_OF_ERROR_METERS = 0.05f;  // deadband in meters (~50 pixels at 0.5m altitude)
 
-// Position control PID gain
-// Position control now works in meters instead of pixels
-// kp converts meter error to angle command
-// Typical values:
-// - Conservative: kp = 0.005 (1m error → 0.005 angle command)
-// - For 3s settling time, 10° max tilt: kp ≈ 0.006
-// - For faster response (2s settling): kp ≈ 0.008-0.01
-//
-// Formula: kp = (max_tilt_rad / max_angle_cmd) / (settling_time * g)
-// where max_tilt_rad = 10° × π/180, settling_time = 3s, g = 9.81 m/s²
-const float pos_x_kp     = 0.005f;  // conversion from meters to angle command
-const float pos_x_ti     = 5.0f;
-const float pos_x_td     = 0.01f;
+// X-axis position control (forward/backward) - more aggressive for better hover stability
+const float pos_x_kp     = 0.008f;  // increased from 0.005 - more responsive forward/back correction
+const float pos_x_ti     = 3.0f;    // decreased from 5.0 - faster integral response
+const float pos_x_td     = 0.015f;  // increased from 0.01 - better damping for forward motion
 const float pos_x_eta    = 0.125f;
 const float pos_x_period = 0.0025f;  // 400Hz
 
-const float pos_y_kp     = 0.005f;
-const float pos_y_ti     = 5.0f;
-const float pos_y_td     = 0.01f;
+const float pos_y_kp     = 0.006f;  // moderate increase from 0.005 - balanced lateral correction
+const float pos_y_ti     = 4.0f;    // decreased from 5.0 - good integral response for steady hover
+const float pos_y_td     = 0.008f;  // decreased from 0.01 - less damping needed for lateral motion
 const float pos_y_eta    = 0.125f;
 const float pos_y_period = 0.0025f;
 
-// altitude-dependent pixel-to-meter conversion for optical flow sensor
-// Formula: meters_per_pixel = 0.024 × Z, where Z is altitude in meters
-// Scale constant: 2tan(42°/2) / 35 ≈ 0.024 m/px per meter altitude
-// This is used when converting pixel deltas from sensor to meters
 constexpr float POS_PIXEL_SCALE     = 0.024f;  // m/px per meter altitude
 const float POS_SCALE_BASE_ALTITUDE = 0.5f;    // fallback altitude if sensor reading invalid
 
