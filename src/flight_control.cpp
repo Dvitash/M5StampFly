@@ -695,7 +695,7 @@ void get_command(void) {
         // Manual Throttle
         if (thlo < 0.0) thlo = 0.0;
         if (thlo > 1.0f) thlo = 1.0f;
-        if ((-0.2 < thlo) && (thlo < 0.2)) thlo = 0.0f;  // 不感帯
+        if ((-0.2 < thlo) && (thlo < 0.2)) thlo = 0.0f;  // deadband
         th = (get_trim_duty(Voltage) + (thlo - 0.4)) * BATTERY_VOLTAGE;
         if (th < 0) th = 0.0f;
         Thrust_command = Thrust_filtered.update(th, Interval_time);
@@ -710,80 +710,83 @@ void get_command(void) {
             Thrust0 = (float)Auto_takeoff_counter / 1000.0;
             if (Thrust0 > get_trim_duty(Voltage)) Thrust0 = get_trim_duty(Voltage);
             Auto_takeoff_counter++;
-        } else
+        } else {
             Thrust0 = get_trim_duty(Voltage);
+        }
 
         // Get Altitude ref
-        if ((-0.2 < thlo) && (thlo < 0.2)) thlo = 0.0f;  // 不感帯
+        if ((-0.2 < thlo) && (thlo < 0.2)) thlo = 0.0f;  // deadband
         Alt_ref = Alt_ref + thlo * 0.001;
         if (Alt_ref > ALT_REF_MAX) Alt_ref = ALT_REF_MAX;
         if (Alt_ref < ALT_REF_MIN) Alt_ref = ALT_REF_MIN;
         if ((Range0flag > OladRange0flag) || (Range0flag == RNAGE0FLAG_MAX)) {
-            Thrust0        = Thrust0 - 0.02;
+            Thrust0        = Thrust0 - 0.02f;
             OladRange0flag = Range0flag;
         }
         Thrust_command = Thrust0 * BATTERY_VOLTAGE;
     }
 
     if (Control_mode == ANGLECONTROL) {
-        Roll_angle_command = 0.4 * Stick[AILERON];
+        Roll_angle_command = 0.4f * Stick[AILERON];
         if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
-        if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
-        Pitch_angle_command = 0.4 * Stick[ELEVATOR];
+        if (Roll_angle_command > 1.0f)  Roll_angle_command =  1.0f;
+        Pitch_angle_command = 0.4f * Stick[ELEVATOR];
         if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
-        if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+        if (Pitch_angle_command > 1.0f)  Pitch_angle_command =  1.0f;
 
-        // Position hold correction (add to stick-based commands)
+        // === Sensor-based position hold (target_x / target_y in meters) ===
         if (PositionHold_flag == 1 && Mode == FLIGHT_MODE) {
-            float pos_x_err          = -(target_x - current_x);
-            float pos_y_err          = target_y - current_y;
-            float distance_magnitude = sqrt(pos_x_err * pos_x_err + pos_y_err * pos_y_err);
+            // Our internal x/y are "forward/back" and "left/right" in meters
+            // error in meters
+            float pos_x_err          = -(target_x - current_x);  // sign chosen to match existing control
+            float pos_y_err          =  (target_y - current_y);
+            float distance_magnitude = sqrtf(pos_x_err * pos_x_err + pos_y_err * pos_y_err);
 
-            // only apply corrections if outside deadband
+            static bool target_reached_logged = false;
+
+            // only apply corrections if outside deadband (~5cm)
             if (distance_magnitude > MARGIN_OF_ERROR_METERS) {
-                // Store previous error for verification
-                static float prev_x_err             = 0.0f;
-                static float prev_y_err             = 0.0f;
-                static float prev_distance          = 0.0f;
-                static uint16_t convergence_counter = 0;
-                static uint16_t divergence_counter  = 0;
+                target_reached_logged = false;
 
-                // position errors are now in meters, PID kp is calibrated for meters
+                // position PID corrections (meters -> angle command units)
                 float roll_correction  = pos_x_pid.update(pos_x_err, Interval_time);
                 float pitch_correction = pos_y_pid.update(pos_y_err, Interval_time);
 
-                // Store angle commands before correction to verify they're being modified
+                // Store angle commands before correction for debug
                 float roll_cmd_before  = Roll_angle_command;
                 float pitch_cmd_before = Pitch_angle_command;
 
-                // add corrections to stick-based commands
-                // negative roll_correction for x: if we're too far right (pos_x_err > 0), tilt left (negative roll)
-                Roll_angle_command -= roll_correction;
-                // positive pitch_correction for y: if we're too far forward (pos_y_err > 0), tilt back (positive pitch)
-                Pitch_angle_command += pitch_correction;
+                // Apply corrections on top of stick input
+                Roll_angle_command  -= roll_correction;   // x-axis -> roll
+                Pitch_angle_command += pitch_correction;  // y-axis -> pitch
 
-                // clamp to limits
+                // clamp to [-1, 1]
                 if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
-                if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
+                if (Roll_angle_command >  1.0f) Roll_angle_command =  1.0f;
                 if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
-                if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+                if (Pitch_angle_command >  1.0f) Pitch_angle_command =  1.0f;
 
-                // Verify corrections are working:
-                // 1. Check if corrections are being applied (command changed)
-                bool roll_corrected  = (fabs(Roll_angle_command - roll_cmd_before) > 0.001f);
-                bool pitch_corrected = (fabs(Pitch_angle_command - pitch_cmd_before) > 0.001f);
+                // Verify corrections
+                bool roll_corrected  = (fabsf(Roll_angle_command  - roll_cmd_before)  > 0.001f);
+                bool pitch_corrected = (fabsf(Pitch_angle_command - pitch_cmd_before) > 0.001f);
 
-                // 2. Check if corrections are in correct direction
-                // For x: if error > 0 (too far right), correction should be positive (subtracted to tilt left)
-                // Roll_angle_command -= roll_correction, so positive correction = negative roll = tilt left
-                bool roll_direction_ok = (pos_x_err > 0 && roll_correction > 0) ||
-                                         (pos_x_err < 0 && roll_correction < 0) || (fabs(pos_x_err) < 1.0f);
-                // For y: if error > 0 (too far forward), correction should be positive (added to tilt back)
-                // Pitch_angle_command += pitch_correction, so positive correction = positive pitch = tilt back
-                bool pitch_direction_ok = (pos_y_err > 0 && pitch_correction > 0) ||
-                                          (pos_y_err < 0 && pitch_correction < 0) || (fabs(pos_y_err) < 1.0f);
+                bool roll_direction_ok =
+                    (pos_x_err >  0 && roll_correction >  0) ||
+                    (pos_x_err <  0 && roll_correction <  0) ||
+                    (fabsf(pos_x_err) < 1.0f);
 
-                // 3. Check convergence: distance should be decreasing
+                bool pitch_direction_ok =
+                    (pos_y_err >  0 && pitch_correction >  0) ||
+                    (pos_y_err <  0 && pitch_correction <  0) ||
+                    (fabsf(pos_y_err) < 1.0f);
+
+                static float   prev_x_err    = 0.0f;
+                static float   prev_y_err    = 0.0f;
+                static float   prev_distance = 0.0f;
+                static uint16_t convergence_counter = 0;
+                static uint16_t divergence_counter  = 0;
+                static uint16_t debug_counter       = 0;
+
                 if (prev_distance > 0.0f) {
                     if (distance_magnitude < prev_distance) {
                         convergence_counter++;
@@ -794,34 +797,37 @@ void get_command(void) {
                     }
                 }
 
-                // debug: log position control data every 100ms (40 loops at 400Hz)
-                // errors and distances are now in meters
-                static uint16_t debug_counter = 0;
+                // Debug print every ~100ms (40 cycles at 400Hz)
                 debug_counter++;
                 if (debug_counter >= 40) {
-                    debug_counter         = 0;
-                    float error_change_x  = pos_x_err - prev_x_err;
-                    float error_change_y  = pos_y_err - prev_y_err;
+                    debug_counter = 0;
+
+                    float error_change_x  = pos_x_err    - prev_x_err;
+                    float error_change_y  = pos_y_err    - prev_y_err;
                     float distance_change = distance_magnitude - prev_distance;
 
-                    print("pos: err_x=%.1f err_y=%.1f | corr: roll=%.4f pitch=%.4f | cmd: roll=%.3f pitch=%.3f\n",
-                          pos_x_err, pos_y_err, roll_correction, pitch_correction, Roll_angle_command,
-                          Pitch_angle_command);
-                    print(
-                        "verify: roll_applied=%d pitch_applied=%d | dir_ok: roll=%d pitch=%d | dist=%.1f chg=%.1f "
-                        "conv=%d div=%d\n",
-                        roll_corrected, pitch_corrected, roll_direction_ok, pitch_direction_ok, distance_magnitude,
-                        distance_change, convergence_counter, divergence_counter);
+                    print("POS CTRL: err_x=%.3f m err_y=%.3f m | corr: roll=%.4f pitch=%.4f | "
+                          "cmd: roll=%.3f pitch=%.3f\r\n",
+                          pos_x_err, pos_y_err,
+                          roll_correction, pitch_correction,
+                          Roll_angle_command, Pitch_angle_command);
 
-                    // Warning if corrections aren't working
-                    if (!roll_corrected && !pitch_corrected && distance_magnitude > MARGIN_OF_ERROR_METERS) {
-                        print("WARNING: No corrections applied despite position error!\n");
+                    print("VERIFY: roll_applied=%d pitch_applied=%d | dir_ok: roll=%d pitch=%d | "
+                          "dist=%.3f m Δ=%.3f m conv=%u div=%u\r\n",
+                          roll_corrected, pitch_corrected,
+                          roll_direction_ok, pitch_direction_ok,
+                          distance_magnitude, distance_change,
+                          convergence_counter, divergence_counter);
+
+                    if (!roll_corrected && !pitch_corrected &&
+                        distance_magnitude > MARGIN_OF_ERROR_METERS) {
+                        print("WARNING: No corrections applied despite position error!\r\n");
                     }
                     if (!roll_direction_ok || !pitch_direction_ok) {
-                        print("WARNING: Correction direction may be wrong!\n");
+                        print("WARNING: Correction direction may be wrong!\r\n");
                     }
                     if (divergence_counter > 10) {
-                        print("WARNING: Position diverging for %d cycles - corrections may be ineffective\n",
+                        print("WARNING: Position diverging for %u cycles - corrections may be ineffective\r\n",
                               divergence_counter);
                     }
                 }
@@ -830,25 +836,35 @@ void get_command(void) {
                 prev_x_err    = pos_x_err;
                 prev_y_err    = pos_y_err;
                 prev_distance = distance_magnitude;
+
             } else {
-                // reset integral when within deadband to prevent windup
+                // inside deadband: we consider the target reached and just hold here
                 pos_x_pid.i_reset();
                 pos_y_pid.i_reset();
+
+                if (!target_reached_logged) {
+                    print("POS HOLD: target reached (err_x=%.3f m, err_y=%.3f m, dist=%.3f m) | "
+                          "target=(%.3f, %.3f) current=(%.3f, %.3f)\r\n",
+                          pos_x_err, pos_y_err, distance_magnitude,
+                          target_x, target_y,
+                          current_x, current_y);
+                    target_reached_logged = true;
+                }
             }
         } else if (PositionHold_flag == 1 && Mode != FLIGHT_MODE) {
-            // if position hold is enabled but not in flight mode, reset PIDs
+            // position hold enabled but not in flight mode: keep controllers clean
             pos_x_pid.reset();
             pos_y_pid.reset();
         }
     } else if (Control_mode == RATECONTROL) {
         Roll_rate_reference  = get_rate_ref(Stick[AILERON]);
         Pitch_rate_reference = get_rate_ref(Stick[ELEVATOR]);
-        // USBSerial.printf("%9.6f\n\r", Pitch_rate_reference*180.0f/PI);ilear
+        // USBSerial.printf("%9.6f\n\r", Pitch_rate_reference*180.0f/PI);
     }
 
     Yaw_angle_command = Stick[RUDDER];
     if (Yaw_angle_command < -1.0f) Yaw_angle_command = -1.0f;
-    if (Yaw_angle_command > 1.0f) Yaw_angle_command = 1.0f;
+    if (Yaw_angle_command >  1.0f) Yaw_angle_command =  1.0f;
     // Yaw control
     Yaw_rate_reference = 2.0f * PI * (Yaw_angle_command - Rudder_center);
 
@@ -858,6 +874,7 @@ void get_command(void) {
         if (Flip_flag == 1) Mode = FLIP_MODE;
     }
 }
+
 
 #if 0
 float get_trim_duty(float voltage) {

@@ -36,6 +36,10 @@
 extern volatile float acc_x, acc_y, acc_z;
 extern volatile float gyro_x, gyro_y, gyro_z;
 extern volatile float current_x, current_y;
+extern volatile float current_x, current_y;
+extern volatile float target_x, target_y;
+extern volatile uint8_t PositionHold_flag;
+
 
 WebServer server(80);
 
@@ -391,24 +395,46 @@ void auto_land() {
 
 void handle_movement() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    const String dir  = server.arg("direction");
-    const float speed = server.hasArg("speed") ? server.arg("speed").toFloat() : 1.f;
-    if (dir == "left")
-        Stick[AILERON] = -speed;
-    else if (dir == "right")
-        Stick[AILERON] = speed;
-    else if (dir == "forward")
-        Stick[ELEVATOR] = speed;
-    else if (dir == "backward")
-        Stick[ELEVATOR] = -speed;
-    else {
+    const String dir = server.arg("direction");
+
+    // step size in meters; we default to 0.5 m and clamp if a 'step' arg is provided
+    float step = server.hasArg("step") ? server.arg("step").toFloat() : 0.5f;
+    if (step <= 0.0f) step = 0.5f;
+    if (step > 2.0f)  step = 2.0f;
+
+    float old_tx = target_x;
+    float old_ty = target_y;
+
+    if (dir == "forward") {
+        // X axis is forward/backward (positive forward)
+        target_y -= step;
+    } else if (dir == "backward") {
+        target_y += step;
+    } else if (dir == "right") {
+        // Y axis is left/right (positive right)
+        target_x += step;
+    } else if (dir == "left") {
+        target_x -= step;
+    } else {
         server.send(400, "text/plain", "bad direction");
         return;
     }
-    Stick[CONTROLMODE] = 1.f;
-    ahrs_reset_flag    = 0;
+
+    // Ensure angle control + position hold are active
+    Stick[CONTROLMODE]  = 1.0f;       // ANGLECONTROL
+    PositionHold_flag   = 1;          // enable position controller
+    ahrs_reset_flag     = 0;
+
+    // Debug: log the move request
+    print("MOVE CMD: dir=%s step=%.2f m | target: (%.3f, %.3f) -> (%.3f, %.3f) | current: (%.3f, %.3f)\r\n",
+          dir.c_str(), step,
+          old_tx, old_ty,
+          target_x, target_y,
+          current_x, current_y);
+
     server.send(200, "text/plain", "OK");
 }
+
 
 void handle_stop() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -464,7 +490,7 @@ void rc_init(void) {
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
 
     WiFi.mode(WIFI_AP_STA);
-    WiFi.begin("UnitCamS3-WiFi", "");
+    // WiFi.begin("UnitCamS3-WiFi", "");
     WiFi.softAPConfig(IPAddress(10, 0, 0, 1), IPAddress(10, 0, 0, 1), IPAddress(255, 255, 255, 0));
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
 
