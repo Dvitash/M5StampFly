@@ -129,13 +129,13 @@ volatile float current_y               = 0;
 volatile float target_y                = 0;
 constexpr float MARGIN_OF_ERROR_METERS = 0.01f;  // deadband in meters (~50 pixels at 0.5m altitude)
 
-const float pos_x_kp     = 0.010f;
+const float pos_x_kp     = 0.0135f;
 const float pos_x_ti     = 15.0f;
 const float pos_x_td     = 0.030f;
 const float pos_x_eta    = 0.125f;
 const float pos_x_period = 0.0025f;  // 400Hz
 
-const float pos_y_kp     = 0.010f;
+const float pos_y_kp     = 0.0135f;
 const float pos_y_ti     = 15.0f;
 const float pos_y_td     = 0.030f;
 const float pos_y_eta    = 0.125f;
