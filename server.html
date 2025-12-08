@@ -34,9 +34,15 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 12px;
     padding: 12px;
+  }
+  .section-title {
+    font: 600 14px system-ui;
+    margin: 18px 12px 6px;
+    opacity: 0.8;
+    letter-spacing: 0.3px;
   }
   .card {
     background: var(--card);
@@ -128,6 +134,72 @@
   </div>
 </header>
 
+<div class="section-title">Control</div>
+<div class="grid">
+  <div class="card">
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Action sequence</h3>
+      <div class="tiny hint">altitude target (m): <input type="number" id="seqAlt" value="0.5" step="0.1" min="0.2" max="1.8" /></div>
+    </div>
+    <div class="row" style="align-items: center; gap: 8px">
+      <label
+        >action
+        <select id="seqType">
+          <option value="forward">forward</option>
+          <option value="backward">backward</option>
+          <option value="left">left</option>
+          <option value="right">right</option>
+          <option value="wait">wait</option>
+          <option value="altitude">altitude</option>
+          <option value="land">land</option>
+        </select>
+      </label>
+      <label>seconds<input type="number" id="seqDuration" value="2" step="0.1" min="0.1" /></label>
+      <label>speed m/s<input type="number" id="seqSpeed" value="0.35" step="0.05" min="0.05" max="1.5" /></label>
+      <button onclick="addSeqAction()">Add</button>
+      <button onclick="clearSeq()">Clear</button>
+    </div>
+    <div class="tiny hint">sequence</div>
+    <div id="seqList" style="min-height: 64px; max-height: 260px; overflow-y: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px; display: grid; gap: 6px"></div>
+    <div class="row">
+      <button onclick="sendSequence()">Send &amp; start</button>
+      <button onclick="sequenceStop()">Stop</button>
+    </div>
+    <div class="tiny hint">format: forward/back/left/right use speed; wait ignores speed.</div>
+  </div>
+
+  <div class="card">
+    <h3>Keyboard / UI control</h3>
+    <div class="row">
+      <button onclick="nudge('forward')">↑ Forward</button>
+      <button onclick="nudge('backward')">↓ Backward</button>
+      <button onclick="nudge('left')">← Left</button>
+      <button onclick="nudge('right')">→ Right</button>
+    </div>
+    <p>stick post demo:</p>
+    <div class="row">
+      <button onclick="sendStick(0,0,0,0)">Zero sticks</button>
+      <button onclick="sendStick(0.3,0,0,0.5)">Cruise</button>
+    </div>
+    <div class="tiny hint">plot fps: <span id="fps">0</span></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Camera</h3>
+      <div class="tiny hint">status: <span id="cameraStatus">disabled</span></div>
+    </div>
+    <div class="row tiny">
+      <label><input type="checkbox" id="cameraEnabled" />enable camera stream</label>
+    </div>
+    <div id="cameraContainer" style="position: relative; width: 100%; height: 220px; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; overflow: hidden">
+      <img id="cameraStream" style="display: none; width: 100%; height: 100%; object-fit: contain" />
+      <div id="cameraPlaceholder" style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--fg); opacity: 0.7">Camera disabled</div>
+    </div>
+  </div>
+</div>
+
+<div class="section-title">Telemetry & visuals</div>
 <div class="grid">
   <div class="card">
     <div class="row" style="justify-content: space-between; align-items: baseline">
@@ -175,45 +247,6 @@
   </div>
 
   <div class="card">
-    <h3>Keyboard / UI control</h3>
-    <div class="row">
-      <button onclick="nudge('forward')">↑ Forward</button>
-      <button onclick="nudge('backward')">↓ Backward</button>
-      <button onclick="nudge('left')">← Left</button>
-      <button onclick="nudge('right')">→ Right</button>
-    </div>
-    <p>stick post demo:</p>
-    <div class="row">
-      <button onclick="sendStick(0,0,0,0)">Zero sticks</button>
-      <button onclick="sendStick(0.3,0,0,0.5)">Cruise</button>
-    </div>
-    <div class="tiny hint">plot fps: <span id="fps">0</span></div>
-  </div>
-
-  <div class="card">
-    <div class="row" style="justify-content: space-between; align-items: baseline">
-      <h3 style="margin: 0">Log</h3>
-      <label style="font-size: 12px"><input type="checkbox" id="logEnabled" checked />enable polling</label>
-    </div>
-    <input type="text" id="logSearch" placeholder="Search logs..." style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
-    <pre id="log" style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
-  </div>
-
-  <div class="card">
-    <div class="row" style="justify-content: space-between; align-items: baseline">
-      <h3 style="margin: 0">Camera</h3>
-      <div class="tiny hint">status: <span id="cameraStatus">disabled</span></div>
-    </div>
-    <div class="row tiny">
-      <label><input type="checkbox" id="cameraEnabled" />enable camera stream</label>
-    </div>
-    <div id="cameraContainer" style="position: relative; width: 100%; height: 220px; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; overflow: hidden">
-      <img id="cameraStream" style="display: none; width: 100%; height: 100%; object-fit: contain" />
-      <div id="cameraPlaceholder" style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--fg); opacity: 0.7">Camera disabled</div>
-    </div>
-  </div>
-
-  <div class="card">
     <div class="row" style="justify-content: space-between; align-items: baseline">
       <h3 style="margin: 0">Flight Path (Sensor-Based Position)</h3>
       <div class="tiny hint">pos: <span id="flowPos">0, 0</span> px | delta: <span id="flowDelta">0, 0</span> px</div>
@@ -223,6 +256,15 @@
       <button onclick="resetMap()" style="padding: 4px 8px; font-size: 12px">Reset Map</button>
     </div>
     <canvas id="map"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Log</h3>
+      <label style="font-size: 12px"><input type="checkbox" id="logEnabled" checked />enable polling</label>
+    </div>
+    <input type="text" id="logSearch" placeholder="Search logs..." style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
+    <pre id="log" style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
   </div>
 </div>
 
@@ -898,6 +940,136 @@
   window.addEventListener("resize", () => {
     if (mapPath.length > 0) drawMap();
   });
+
+  // action sequence ui
+  const seqPlan = [];
+  const seqTypes = ["forward", "backward", "left", "right", "wait", "altitude", "land"];
+  function renderSeq() {
+    const box = el("seqList");
+    if (seqPlan.length === 0) {
+      box.textContent = "no actions";
+      return;
+    }
+    box.innerHTML = seqPlan
+      .map((a, i) => {
+        const isWait = a.type === "wait";
+        const isAlt = a.type === "altitude";
+        const isLand = a.type === "land";
+        const durInput = isLand || isAlt ? "" : `<label class="tiny">dur (s)<input type="number" min="0.01" step="0.05" value="${a.duration.toFixed(2)}" onchange="updateSeqDuration(${i}, this.value)" /></label>`;
+        const speedInput = isWait || isLand || isAlt ? "" : `<label class="tiny">speed<input type="number" min="0.01" step="0.05" value="${a.speed.toFixed(2)}" onchange="updateSeqSpeed(${i}, this.value)" /></label>`;
+        const altInput = isAlt ? `<label class="tiny">alt (m)<input type="number" min="0.2" max="1.8" step="0.05" value="${(a.alt ?? 0.5).toFixed(2)}" onchange="updateSeqAlt(${i}, this.value)" /></label>` : "";
+        return `<div style="display:grid; grid-template-columns: 1fr auto; gap:8px; padding:6px; border:1px solid #23305a; border-radius:6px; background:#0f1731;">
+            <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+              <label class="tiny">step
+                <select onchange="updateSeqType(${i}, this.value)">
+                  ${seqTypes.map((t) => `<option value="${t}" ${t === a.type ? "selected" : ""}>${t}</option>`).join("")}
+                </select>
+              </label>
+              ${durInput}
+              ${speedInput}
+              ${altInput}
+            </div>
+            <div class="row tiny" style="gap:4px; justify-content:flex-end;">
+              <button onclick="moveSeq(${i}, -1)">↑</button>
+              <button onclick="moveSeq(${i}, 1)">↓</button>
+              <button onclick="removeSeq(${i})">Delete</button>
+            </div>
+          </div>`;
+      })
+      .join("");
+  }
+  function addSeqAction() {
+    const type = el("seqType").value;
+    const duration = Math.max(0.1, Number(el("seqDuration").value) || 0.1);
+    let speed = Math.max(0.05, Number(el("seqSpeed").value) || 0.35);
+    if (speed > 1.5) speed = 1.5;
+    const alt = clampAlt(Number(el("seqAlt").value) || 0.5);
+    seqPlan.push({ type, duration, speed, alt });
+    renderSeq();
+  }
+  function moveSeq(idx, dir) {
+    const j = idx + dir;
+    if (j < 0 || j >= seqPlan.length) return;
+    [seqPlan[idx], seqPlan[j]] = [seqPlan[j], seqPlan[idx]];
+    renderSeq();
+  }
+  function updateSeqType(idx, val) {
+    if (!seqTypes.includes(val)) return;
+    const prev = seqPlan[idx];
+    const speed = prev.speed <= 0 ? 0.35 : prev.speed;
+    seqPlan[idx] = {
+      ...prev,
+      type: val,
+      speed: val === "wait" || val === "land" || val === "altitude" ? 0.0 : clampSpeed(speed),
+      duration: val === "land" || val === "altitude" ? 0.0 : Math.max(0.01, prev.duration),
+    };
+    renderSeq();
+  }
+  function updateSeqDuration(idx, val) {
+    let d = parseFloat(val);
+    if (!isFinite(d) || d <= 0) return;
+    if (d < 0.01) d = 0.01;
+    seqPlan[idx].duration = d;
+    renderSeq();
+  }
+  function updateSeqSpeed(idx, val) {
+    let s = parseFloat(val);
+    if (!isFinite(s) || s <= 0) return;
+    seqPlan[idx].speed = clampSpeed(s);
+    renderSeq();
+  }
+  function updateSeqAlt(idx, val) {
+    let a = parseFloat(val);
+    if (!isFinite(a) || a <= 0) return;
+    seqPlan[idx].alt = clampAlt(a);
+    renderSeq();
+  }
+  function clampSpeed(s) {
+    if (s < 0.05) s = 0.05;
+    if (s > 1.5) s = 1.5;
+    return s;
+  }
+  function clampAlt(a) {
+    if (a < 0.2) a = 0.2;
+    if (a > 1.8) a = 1.8;
+    return a;
+  }
+  function removeSeq(idx) {
+    seqPlan.splice(idx, 1);
+    renderSeq();
+  }
+  function clearSeq() {
+    seqPlan.length = 0;
+    renderSeq();
+  }
+  async function sendSequence() {
+    if (seqPlan.length === 0) {
+      log("sequence empty");
+      return;
+    }
+    const alt = Math.max(0.2, Math.min(1.8, Number(el("seqAlt").value) || 0.5));
+    const tokens = seqPlan.map((a) => (a.type === "wait" ? `wait:${a.duration.toFixed(2)}` : a.type === "land" ? "land" : a.type === "altitude" ? `alt:${clampAlt(a.alt ?? alt).toFixed(2)}` : `${a.type}:${a.duration.toFixed(2)}:${a.speed.toFixed(2)}`));
+    const body = new URLSearchParams();
+    body.set("actions", tokens.join(","));
+    body.set("altitude", alt.toFixed(2));
+    try {
+      const r = await fetch(`http://${host}/sequence`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString() });
+      const txt = await r.text();
+      log(`sequence send: ${txt.trim()}`);
+    } catch (e) {
+      log("sequence send failed");
+    }
+  }
+  async function sequenceStop() {
+    try {
+      const r = await http(`/sequence/stop`);
+      const t = await r.text();
+      log(`sequence stop: ${t.trim()}`);
+    } catch (e) {
+      log("sequence stop failed");
+    }
+  }
+  renderSeq();
 
   // camera streaming
   let cameraStreamActive = false;

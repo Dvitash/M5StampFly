@@ -476,6 +476,8 @@ void loop_400Hz(void) {
         rate_control();
     }
 
+    sequence_tick(Interval_time);
+
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;
     OldMode          = Mode;
@@ -1269,6 +1271,15 @@ void auto_takeoff_and_hover(float target_altitude) {
     // enable position hold (skyhook)
     PositionHold_flag = 1;
     // reset position PID controllers
+    pos_x_pid.reset();
+    pos_y_pid.reset();
+}
+
+void reset_position_state(void) {
+    current_x = 0.0f;
+    current_y = 0.0f;
+    target_x  = 0.0f;
+    target_y  = 0.0f;
     pos_x_pid.reset();
     pos_y_pid.reset();
 }

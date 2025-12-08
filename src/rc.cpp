@@ -39,7 +39,7 @@ extern volatile float current_x, current_y;
 extern volatile float current_x, current_y;
 extern volatile float target_x, target_y;
 extern volatile uint8_t PositionHold_flag;
-
+extern volatile uint8_t Mode;
 
 WebServer server(80);
 
@@ -400,7 +400,7 @@ void handle_movement() {
     // step size in meters; we default to 0.5 m and clamp if a 'step' arg is provided
     float step = server.hasArg("step") ? server.arg("step").toFloat() : 0.5f;
     if (step <= 0.0f) step = 0.5f;
-    if (step > 2.0f)  step = 2.0f;
+    if (step > 2.0f) step = 2.0f;
 
     float old_tx = target_x;
     float old_ty = target_y;
@@ -421,20 +421,16 @@ void handle_movement() {
     }
 
     // Ensure angle control + position hold are active
-    Stick[CONTROLMODE]  = 1.0f;       // ANGLECONTROL
-    PositionHold_flag   = 1;          // enable position controller
-    ahrs_reset_flag     = 0;
+    Stick[CONTROLMODE] = 1.0f;  // ANGLECONTROL
+    PositionHold_flag  = 1;     // enable position controller
+    ahrs_reset_flag    = 0;
 
     // Debug: log the move request
     print("MOVE CMD: dir=%s step=%.2f m | target: (%.3f, %.3f) -> (%.3f, %.3f) | current: (%.3f, %.3f)\r\n",
-          dir.c_str(), step,
-          old_tx, old_ty,
-          target_x, target_y,
-          current_x, current_y);
+          dir.c_str(), step, old_tx, old_ty, target_x, target_y, current_x, current_y);
 
     server.send(200, "text/plain", "OK");
 }
-
 
 void handle_stop() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -484,6 +480,249 @@ void handle_reset_position() {
     current_x = 0.0f;
     current_y = 0.0f;
     server.send(200, "text/plain", "OK");
+}
+
+// -------- action sequence support --------
+enum class SeqActionType : uint8_t { MOVE, WAIT, ALT, LAND };
+
+struct SeqAction {
+    SeqActionType type;
+    char axis;    // 'x' or 'y' for move
+    int8_t sign;  // +1 or -1 for move
+    float speed_mps;
+    float duration_s;
+    float alt_target;
+};
+
+static SeqAction g_seq[16];
+static uint8_t g_seq_len        = 0;
+static uint8_t g_seq_index      = 0;
+static float g_seq_elapsed      = 0.0f;
+static volatile bool g_seq_live = false;
+
+static void sequence_reset_state() {
+    g_seq_len     = 0;
+    g_seq_index   = 0;
+    g_seq_elapsed = 0.0f;
+    g_seq_live    = false;
+}
+
+static bool parse_action_token(const String &token, SeqAction &out) {
+    String t = token;
+    t.trim();
+    if (t.length() == 0) return false;
+
+    int first = t.indexOf(':');
+    String kind;
+    String durStr;
+    String speedStr;
+    if (first < 0) {
+        kind = t;
+    } else {
+        kind       = t.substring(0, first);
+        int second = t.indexOf(':', first + 1);
+        if (second < 0) {
+            durStr = t.substring(first + 1);
+        } else {
+            durStr   = t.substring(first + 1, second);
+            speedStr = t.substring(second + 1);
+        }
+    }
+    kind.toLowerCase();
+
+    float duration = durStr.length() ? durStr.toFloat() : 0.0f;
+    float speed    = speedStr.length() ? speedStr.toFloat() : 0.35f;
+
+    // default clamps
+    if (speed <= 0.0f) speed = 0.35f;
+    if (speed > 1.5f) speed = 1.5f;
+
+    // duration handling per kind
+    if (kind == "wait" || kind == "pause" || kind == "move" || kind == "forward" || kind == "backward" ||
+        kind == "left" || kind == "right") {
+        if (duration <= 0.0f) return false;
+        if (duration < 0.01f) duration = 0.01f;
+    } else {
+        // for alt/land allow zero duration (instant)
+        if (duration < 0.0f) duration = 0.0f;
+    }
+
+    if (kind == "wait" || kind == "pause") {
+        out.type       = SeqActionType::WAIT;
+        out.axis       = 'x';
+        out.sign       = 0;
+        out.speed_mps  = 0.0f;
+        out.duration_s = duration;
+        out.alt_target = 0.0f;
+        return true;
+    }
+
+    if (kind == "alt" || kind == "altitude") {
+        float alt = duration;
+        if (alt <= 0.0f && speedStr.length()) alt = speedStr.toFloat();  // fallback
+        if (alt < 0.2f) alt = 0.2f;
+        if (alt > 1.8f) alt = 1.8f;
+        out.type       = SeqActionType::ALT;
+        out.axis       = 'x';
+        out.sign       = 0;
+        out.speed_mps  = 0.0f;
+        out.duration_s = 0.0f;
+        out.alt_target = alt;
+        return true;
+    }
+
+    if (kind == "land" || kind == "landing") {
+        out.type       = SeqActionType::LAND;
+        out.axis       = 'x';
+        out.sign       = 0;
+        out.speed_mps  = 0.0f;
+        out.duration_s = 0.0f;
+        out.alt_target = 0.0f;
+        return true;
+    }
+
+    out.type       = SeqActionType::MOVE;
+    out.duration_s = duration;
+    out.speed_mps  = speed;
+    out.alt_target = 0.0f;
+    if (kind == "forward") {
+        out.axis = 'y';
+        out.sign = -1;
+    } else if (kind == "backward") {
+        out.axis = 'y';
+        out.sign = 1;
+    } else if (kind == "right") {
+        out.axis = 'x';
+        out.sign = 1;
+    } else if (kind == "left") {
+        out.axis = 'x';
+        out.sign = -1;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static void handle_sequence() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+
+    String actions = server.arg("actions");
+    if (!actions.length()) {
+        server.send(400, "text/plain", "missing actions");
+        return;
+    }
+
+    float alt = server.hasArg("altitude") ? server.arg("altitude").toFloat() : 0.5f;
+    if (alt < 0.2f) alt = 0.2f;
+    if (alt > 1.8f) alt = 1.8f;
+
+    SeqAction parsed[16];
+    uint8_t count = 0;
+
+    int start = 0;
+    while (start < actions.length() && count < 16) {
+        int comma = actions.indexOf(',', start);
+        if (comma < 0) comma = actions.length();
+        String token = actions.substring(start, comma);
+        if (parse_action_token(token, parsed[count])) {
+            count++;
+        } else {
+            server.send(400, "text/plain", "bad action: " + token);
+            return;
+        }
+        start = comma + 1;
+    }
+
+    if (count == 0) {
+        server.send(400, "text/plain", "no valid actions");
+        return;
+    }
+
+    sequence_reset_state();
+    for (uint8_t i = 0; i < count; i++) g_seq[i] = parsed[i];
+    g_seq_len  = count;
+    g_seq_live = true;
+
+    reset_position_state();
+    auto_takeoff_and_hover(alt);
+    Stick[CONTROLMODE]    = ANGLECONTROL;
+    Stick[ALTCONTROLMODE] = AUTO_ALT;
+    // free-fly laterally during sequence; no position hold corrections
+    PositionHold_flag = 0;
+    ahrs_reset_flag   = 0;
+
+    print("SEQ start: %u actions, alt=%.2f\r\n", g_seq_len, alt);
+    server.send(200, "text/plain", "OK");
+}
+
+static void handle_sequence_stop() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    sequence_stop();
+    server.send(200, "text/plain", "stopped");
+}
+
+void sequence_stop(void) {
+    g_seq_live        = false;
+    g_seq_len         = 0;
+    g_seq_index       = 0;
+    g_seq_elapsed     = 0.0f;
+    Stick[AILERON]    = 0.0f;
+    Stick[ELEVATOR]   = 0.0f;
+    PositionHold_flag = 0;
+    print("SEQ stop\r\n");
+}
+
+void sequence_tick(float dt_sec) {
+    if (!g_seq_live || g_seq_len == 0) return;
+    if (dt_sec <= 0.0f) return;
+    if (Mode != FLIGHT_MODE && Mode != AUTO_LANDING_MODE && Mode != PARKING_MODE) return;
+
+    if (g_seq_index >= g_seq_len) {
+        sequence_stop();
+        return;
+    }
+
+    SeqAction &act = g_seq[g_seq_index];
+
+    // default to zero stick unless the step commands motion
+    float ail_cmd = 0.0f;
+    float ele_cmd = 0.0f;
+
+    if (act.type == SeqActionType::MOVE) {
+        // map speed (m/s) into a normalized stick deflection (0..1)
+        float mag = act.speed_mps / 1.0f;  // 1 m/s -> full stick
+        if (mag > 1.0f) mag = 1.0f;
+        if (mag < 0.0f) mag = 0.0f;
+
+        if (act.axis == 'x') {
+            ail_cmd = mag * (float)act.sign;
+        } else if (act.axis == 'y') {
+            ele_cmd = mag * (float)act.sign;
+        }
+    } else if (act.type == SeqActionType::ALT) {
+        Alt_ref = act.alt_target;
+        g_seq_index++;
+        g_seq_elapsed = 0.0f;
+        if (g_seq_index >= g_seq_len) sequence_stop();
+        return;
+    } else if (act.type == SeqActionType::LAND) {
+        request_mode_change(AUTO_LANDING_MODE);
+        sequence_stop();
+        return;
+    }
+
+    // apply virtual sticks directly
+    Stick[AILERON]  = ail_cmd;
+    Stick[ELEVATOR] = ele_cmd;
+
+    g_seq_elapsed += dt_sec;
+    if (g_seq_elapsed + 1e-5f >= act.duration_s) {
+        g_seq_index++;
+        g_seq_elapsed = 0.0f;
+        if (g_seq_index >= g_seq_len) {
+            sequence_stop();
+        }
+    }
 }
 
 void rc_init(void) {
@@ -551,6 +790,8 @@ void rc_init(void) {
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
     server.on("/reset/position", HTTP_GET, handle_reset_position);
+    server.on("/sequence", HTTP_POST, handle_sequence);
+    server.on("/sequence/stop", HTTP_GET, handle_sequence_stop);
 
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
@@ -561,6 +802,8 @@ void rc_init(void) {
     server.on("/logs", HTTP_OPTIONS, handle_options);
     server.on("/ping", HTTP_OPTIONS, handle_options);
     server.on("/reset/position", HTTP_OPTIONS, handle_options);
+    server.on("/sequence", HTTP_OPTIONS, handle_options);
+    server.on("/sequence/stop", HTTP_OPTIONS, handle_options);
 
     server.on("/camera/stream", HTTP_GET, []() {
         server.sendHeader("Access-Control-Allow-Origin", "*");
