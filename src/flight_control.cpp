@@ -46,6 +46,7 @@
 #include "button.hpp"
 #include "buzzer.h"
 #include "serial_logger.hpp"
+#include "tof.hpp"
 
 // モータPWM出力Pinのアサイン
 // Motor PWM Pin
@@ -139,7 +140,7 @@ const float pos_y_kp     = 0.0135f;
 const float pos_y_ti     = 15.0f;
 const float pos_y_td     = 0.030f;
 const float pos_y_eta    = 0.125f;
-const float pos_y_period = 0.0025f;
+const float pos_y_period = 0.0025f;  // 400Hz
 
 constexpr float POS_PIXEL_SCALE     = 0.024f;  // m/px per meter altitude
 const float POS_SCALE_BASE_ALTITUDE = 0.5f;    // fallback altitude if sensor reading invalid
@@ -208,6 +209,10 @@ uint16_t Flip_counter            = 0;
 float Flip_time                  = 2.0;
 volatile uint8_t Ahrs_reset_flag = 0;
 float T_flip;
+
+// Front ToF sensor 
+volatile int16_t front_mm;
+bool front_obstacle = false;     // front obstacle flag
 
 // PID object and etc.
 PID p_pid;
@@ -372,6 +377,20 @@ void loop_400Hz(void) {
     // read sensor value
     sense_time       = sensor_read();
     uint32_t cs_time = micros();
+
+    // front ToF
+    static uint16_t tof_debug_counter = 0;
+    tof_debug_counter++;
+
+    // measure at 10 Hz
+    if (tof_debug_counter >= 40) {
+        tof_debug_counter = 0;
+
+        front_mm  = tof_front_get_range();
+
+        // serial_logger print 
+        print("front=%d mm\n", front_mm);
+    }
 
     // led drive
     led_drive();
@@ -745,6 +764,20 @@ void get_command(void) {
             OladRange0flag = Range0flag;
         }
         Thrust_command = Thrust0 * BATTERY_VOLTAGE;
+
+
+        // check for obstacle in front
+        if(front_mm > 0 && front_mm < 800){ // check if > 0 because 0 is the default (really far) value
+            Stick[ELEVATOR] = 0.1;
+            front_obstacle = true;
+        } else if(front_mm > 0 && front_mm < 1500) {
+            Stick[ELEVATOR] = 0.005; 
+            front_obstacle = true;
+        } else if(front_obstacle && front_mm > 1800){
+                auto_takeoff_and_hover(0.5);
+                front_obstacle = false;
+        }
+
     }
 
     if (Control_mode == ANGLECONTROL) {
@@ -807,23 +840,23 @@ void get_command(void) {
                     }
                 }
 
-                debug_counter++;
-                if (debug_counter >= 40) {
-                    debug_counter         = 0;
-                    float distance_change = distance_magnitude - prev_distance;
+                // debug_counter++;
+                // if (debug_counter >= 40) {
+                //     debug_counter         = 0;
+                //     float distance_change = distance_magnitude - prev_distance;
 
-                    print(
-                        "POS CTRL: err_x=%.3f m err_y=%.3f m | corr: roll=%.4f pitch=%.4f | "
-                        "cmd: roll=%.3f pitch=%.3f\r\n",
-                        err_x, err_y, roll_correction, pitch_correction, Roll_angle_command, Pitch_angle_command);
+                //     print(
+                //         "POS CTRL: err_x=%.3f m err_y=%.3f m | corr: roll=%.4f pitch=%.4f | "
+                //         "cmd: roll=%.3f pitch=%.3f\r\n",
+                //         err_x, err_y, roll_correction, pitch_correction, Roll_angle_command, Pitch_angle_command);
 
-                    print("VERIFY: dist=%.3f m Δ=%.3f m conv=%u div=%u\r\n", distance_magnitude, distance_change,
-                          convergence_counter, divergence_counter);
+                //     print("VERIFY: dist=%.3f m Δ=%.3f m conv=%u div=%u\r\n", distance_magnitude, distance_change,
+                //           convergence_counter, divergence_counter);
 
-                    if (divergence_counter > 20) {
-                        print("WARNING: Position diverging for %u cycles - check sign/scale\r\n", divergence_counter);
-                    }
-                }
+                //     if (divergence_counter > 20) {
+                //         print("WARNING: Position diverging for %u cycles - check sign/scale\r\n", divergence_counter);
+                //     }
+                // }
 
                 prev_distance = distance_magnitude;
 
@@ -1286,77 +1319,4 @@ void reset_position_state(void) {
 
 int8_t sign(float x) {
     return (x > 0) ? 1 : (x < 0) ? -1 : 0;
-}
-
-// Calculate position control kp from calibration measurements
-// Formula: kp = (max_tilt_rad / max_angle_cmd) / (pixels_per_meter * settling_time * g)
-// Where:
-//   - max_tilt_rad: maximum tilt angle in radians (e.g., 10° = 0.175 rad)
-//   - max_angle_cmd: maximum angle command (1.0 for full stick)
-//   - pixels_per_meter: measured pixels per meter from calibration
-//   - settling_time: desired time to reach target (seconds)
-//   - g: gravitational acceleration (9.81 m/s²)
-float calculate_pos_kp_from_calibration(float pixels_per_meter, float settling_time, float max_tilt_deg) {
-    const float g             = 9.81f;                       // gravitational acceleration m/s²
-    const float max_angle_cmd = 1.0f;                        // maximum angle command (full stick)
-    const float max_tilt_rad  = max_tilt_deg * PI / 180.0f;  // convert degrees to radians
-
-    if (pixels_per_meter <= 0.0f || settling_time <= 0.0f || max_tilt_deg <= 0.0f) {
-        return 0.0f;  // invalid parameters
-    }
-
-    // Calculate kp using the physics-based formula
-    float kp = (max_tilt_rad / max_angle_cmd) / (pixels_per_meter * settling_time * g);
-
-    return kp;
-}
-
-// Calibration helper function: calculates and prints recommended kp values
-// Usage: Call this after moving copter a known distance and measuring pixels
-// Example: calibrate_position_control(0.5f, 100.0f, 0.5f);
-//   - moved 0.5m forward
-//   - accumulated 100 pixels
-//   - at 0.5m altitude
-void calibrate_position_control(float physical_distance_m, float pixels_accumulated, float altitude_m) {
-    if (physical_distance_m <= 0.0f || pixels_accumulated <= 0.0f || altitude_m <= 0.0f) {
-        print("ERROR: Invalid calibration parameters\n");
-        return;
-    }
-
-    // Calculate pixels per meter
-    float pixels_per_meter = pixels_accumulated / physical_distance_m;
-
-    print("\n=== POSITION CONTROL CALIBRATION ===\n");
-    print("Measured data:\n");
-    print("  Physical distance: %.3f m\n", physical_distance_m);
-    print("  Pixels accumulated: %.1f pixels\n", pixels_accumulated);
-    print("  Altitude: %.3f m\n", altitude_m);
-    print("  Pixels per meter: %.2f pixels/m\n\n", pixels_per_meter);
-
-    // Calculate kp for different settling times and max tilt angles
-    print("Recommended kp values:\n");
-    print("Settling Time | Max Tilt | Calculated kp\n");
-    print("----------------------------------------\n");
-
-    float settling_times[] = {2.0f, 3.0f, 4.0f, 5.0f};
-    float max_tilts[]      = {8.0f, 10.0f, 12.0f, 15.0f};
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            float kp = calculate_pos_kp_from_calibration(pixels_per_meter, settling_times[i], max_tilts[j]);
-            print("%.1f s        | %5.1f°   | %.6f\n", settling_times[i], max_tilts[j], kp);
-        }
-    }
-
-    // Recommend a specific value (conservative: 3s settling, 10° max tilt)
-    float recommended_kp = calculate_pos_kp_from_calibration(pixels_per_meter, 3.0f, 10.0f);
-    print("\nRecommended (conservative): kp = %.6f\n", recommended_kp);
-    print("  Based on: 3.0s settling time, 10° max tilt\n");
-    print("  Copy this value to pos_x_kp and pos_y_kp in flight_control.cpp\n\n");
-
-    // Calculate altitude scaling factor
-    float scale_factor = POS_SCALE_BASE_ALTITUDE / altitude_m;
-    print("Altitude scaling factor: %.3f\n", scale_factor);
-    print("  (For altitude-dependent scaling, multiply kp by this factor)\n");
-    print("=====================================\n\n");
 }

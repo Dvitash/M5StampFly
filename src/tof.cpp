@@ -95,7 +95,7 @@ void tof_init(void) {
     // Front ToF Setting
     print("#2 WaitDeviceBooted Status:%d\n\r", VL53LX_WaitDeviceBooted(ToF_front));
     print("#2 DataInit Status:%d\n\r", VL53LX_DataInit(ToF_front));
-    print("#1 Range setting  Status:%d\n\r", VL53LX_SetDistanceMode(ToF_front, VL53LX_DISTANCEMODE_LONG));
+    print("#1 Range setting  Status:%d\n\r", VL53LX_SetDistanceMode(ToF_front, VL53LX_DISTANCEMODE_MEDIUM));
     print("#2 SetMeasurementTimingBuget Status:%d\n\r",
                      VL53LX_SetMeasurementTimingBudgetMicroSeconds(ToF_front, 33000));
     print("#2 RdByte Status:%d\n\r", VL53LX_RdByte(ToF_front, 0x010F, &byteData));
@@ -108,6 +108,7 @@ void tof_init(void) {
     attachInterrupt(INT_BOTTOM, &tof_int, FALLING);
 
     VL53LX_ClearInterruptAndStartMeasurement(ToF_bottom);
+    VL53LX_ClearInterruptAndStartMeasurement(ToF_front);
     delay(100);
     print("#Start Measurement Status:%d\n\r", VL53LX_StartMeasurement(ToF_bottom));
 }
