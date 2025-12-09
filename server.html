@@ -120,6 +120,45 @@
   .hint {
     opacity: 0.75;
   }
+  .muted {
+    opacity: 0.55;
+  }
+  #mapCard {
+    position: relative;
+    overflow: hidden;
+  }
+  #mapWrap {
+    position: relative;
+    width: 100%;
+    height: 220px;
+  }
+  #mapWrap canvas {
+    width: 100%;
+    height: 100%;
+  }
+  #mapOverlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .click-ping {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid #68a0ff;
+    opacity: 0.8;
+    transform: translate(-50%, -50%) scale(0.3);
+    animation: clickPing 620ms ease-out forwards;
+    box-shadow: 0 0 14px rgba(104, 160, 255, 0.4);
+  }
+  @keyframes clickPing {
+    to {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(2.6);
+      box-shadow: 0 0 28px rgba(104, 160, 255, 0);
+    }
+  }
 </style>
 <header>
   <h1>Drone Telemetry</h1>
@@ -263,7 +302,7 @@
     <canvas id="gyr"></canvas>
   </div>
 
-  <div class="card">
+  <div class="card" id="mapCard">
     <div class="row" style="justify-content: space-between; align-items: baseline">
       <h3 style="margin: 0">Flight Path (Sensor-Based Position)</h3>
       <div class="tiny hint">pos: <span id="flowPos">0, 0</span> px | delta: <span id="flowDelta">0, 0</span> px</div>
@@ -272,7 +311,11 @@
       <label><input type="checkbox" id="mapReset" />reset on next reading</label>
       <button onclick="resetMap()" style="padding: 4px 8px; font-size: 12px">Reset Map</button>
     </div>
-    <canvas id="map"></canvas>
+    <div class="tiny hint">target: <span id="targetLabel">—</span> • prev: <span id="prevTargetLabel" class="muted">—</span></div>
+    <div id="mapWrap">
+      <canvas id="map"></canvas>
+      <div id="mapOverlay"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -479,13 +522,18 @@
   // map
   const mapCanvas = el("map");
   const mapCtx = mapCanvas.getContext("2d");
+  const mapOverlay = el("mapOverlay");
   let mapPath = [];
   let lastAbsoluteX = null;
   let lastAbsoluteY = null;
   let startX = null;
   let startY = null;
-  let mapScale = 1.0;
   let mapBounds = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  let mapTransform = { scale: 1, offsetX: 0, offsetY: 0, width: 0, height: 0 };
+  let currentTarget = null;
+  let previousTarget = null;
+  const targetLabel = el("targetLabel");
+  const prevTargetLabel = el("prevTargetLabel");
 
   // threshold for detecting jumps (packet loss or network delay)
   const JUMP_THRESHOLD = 50; // pixels
@@ -497,7 +545,61 @@
     startX = null;
     startY = null;
     mapBounds = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+    currentTarget = null;
+    previousTarget = null;
+    updateTargetLabels();
     http(`/reset/position`).catch(() => {});
+    drawMap();
+  }
+
+  function updateTargetLabels() {
+    targetLabel.textContent = currentTarget ? `${currentTarget.x.toFixed(2)}, ${currentTarget.y.toFixed(2)}` : "—";
+    prevTargetLabel.textContent = previousTarget ? `${previousTarget.x.toFixed(2)}, ${previousTarget.y.toFixed(2)}` : "—";
+  }
+
+  function screenToWorld(px, py) {
+    if (!mapTransform.scale) return null;
+    return { x: (px - mapTransform.offsetX) / mapTransform.scale, y: (py - mapTransform.offsetY) / mapTransform.scale };
+  }
+
+  function spawnClickPing(px, py) {
+    if (!mapOverlay) return;
+    const d = document.createElement("div");
+    d.className = "click-ping";
+    d.style.left = `${px}px`;
+    d.style.top = `${py}px`;
+    mapOverlay.appendChild(d);
+    setTimeout(() => d.remove(), 650);
+  }
+
+  async function sendTargetToDrone(pt) {
+    const body = new URLSearchParams();
+    body.set("x", pt.x.toFixed(3));
+    body.set("y", pt.y.toFixed(3));
+    try {
+      const r = await http(`/target`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      });
+      const txt = await r.text();
+      log(`target set (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}) -> ${txt.trim()}`);
+    } catch (e) {
+      log("target set failed");
+    }
+  }
+
+  function handleMapClick(ev) {
+    const rect = mapCanvas.getBoundingClientRect();
+    const sx = ev.clientX - rect.left;
+    const sy = ev.clientY - rect.top;
+    const world = screenToWorld(sx, sy);
+    if (!world) return;
+    if (currentTarget) previousTarget = { ...currentTarget };
+    currentTarget = world;
+    updateTargetLabels();
+    spawnClickPing(sx, sy);
+    sendTargetToDrone(world);
     drawMap();
   }
 
@@ -513,24 +615,32 @@
     ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    if (mapPath.length === 0) {
-      ctx.fillStyle = "#23305a";
-      ctx.font = "12px system-ui";
-      ctx.textAlign = "center";
-      ctx.fillText("Waiting for sensor data...", rect.width / 2, rect.height / 2);
-      return;
-    }
+    const minRangeMeters = 8.0;
+    mapTransform = {
+      scale: Math.min(rect.width / minRangeMeters, rect.height / minRangeMeters),
+      offsetX: rect.width / 2,
+      offsetY: rect.height / 2,
+      width: rect.width,
+      height: rect.height,
+    };
 
     // calculate bounds
     let minX = Infinity,
       maxX = -Infinity,
       minY = Infinity,
       maxY = -Infinity;
-    for (const p of mapPath) {
-      minX = Math.min(minX, p.x);
-      maxX = Math.max(maxX, p.x);
-      minY = Math.min(minY, p.y);
-      maxY = Math.max(maxY, p.y);
+    if (mapPath.length === 0) {
+      minX = -1;
+      maxX = 1;
+      minY = -1;
+      maxY = 1;
+    } else {
+      for (const p of mapPath) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
     }
     mapBounds = { minX, maxX, minY, maxY };
 
@@ -548,19 +658,27 @@
     // total range with padding
     const totalRangeX = rangeX + paddingX * 2;
     const totalRangeY = rangeY + paddingY * 2;
+    const drawRangeX = Math.max(totalRangeX, minRangeMeters);
+    const drawRangeY = Math.max(totalRangeY, minRangeMeters);
 
     // calculate center of actual movement
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
+    const visMinX = centerX - drawRangeX / 2;
+    const visMaxX = centerX + drawRangeX / 2;
+    const visMinY = centerY - drawRangeY / 2;
+    const visMaxY = centerY + drawRangeY / 2;
 
     // scale to fit with aspect ratio preservation
-    const scaleX = rect.width / totalRangeX;
-    const scaleY = rect.height / totalRangeY;
+    const scaleX = rect.width / drawRangeX;
+    const scaleY = rect.height / drawRangeY;
     const scale = Math.min(scaleX, scaleY);
 
     // offset to center the movement
     const offsetX = rect.width / 2 - centerX * scale;
     const offsetY = rect.height / 2 - centerY * scale;
+
+    mapTransform = { scale, offsetX, offsetY, width: rect.width, height: rect.height };
 
     // draw grid with adaptive spacing based on movement range
     ctx.strokeStyle = "#1f2a4d";
@@ -568,8 +686,8 @@
 
     // adaptive grid spacing: aim for 8-12 grid lines visible
     const targetGridLines = 10;
-    const gridSpacingX = totalRangeX / targetGridLines;
-    const gridSpacingY = totalRangeY / targetGridLines;
+    const gridSpacingX = drawRangeX / targetGridLines;
+    const gridSpacingY = drawRangeY / targetGridLines;
 
     // round to nice numbers (powers of 10, or 1/2, 1/5 multipliers)
     function niceSpacing(spacing) {
@@ -586,10 +704,10 @@
     const niceSpacingY = niceSpacing(gridSpacingY);
 
     // grid lines in world coordinates
-    const gridStartX = Math.floor((minX - paddingX) / niceSpacingX) * niceSpacingX;
-    const gridEndX = Math.ceil((maxX + paddingX) / niceSpacingX) * niceSpacingX;
-    const gridStartY = Math.floor((minY - paddingY) / niceSpacingY) * niceSpacingY;
-    const gridEndY = Math.ceil((maxY + paddingY) / niceSpacingY) * niceSpacingY;
+    const gridStartX = Math.floor(visMinX / niceSpacingX) * niceSpacingX;
+    const gridEndX = Math.ceil(visMaxX / niceSpacingX) * niceSpacingX;
+    const gridStartY = Math.floor(visMinY / niceSpacingY) * niceSpacingY;
+    const gridEndY = Math.ceil(visMaxY / niceSpacingY) * niceSpacingY;
 
     for (let gx = gridStartX; gx <= gridEndX; gx += niceSpacingX) {
       const x = gx * scale + offsetX;
@@ -696,6 +814,26 @@
       }
     }
 
+    // draw targets
+    const drawTarget = (pt, color, radius, alpha) => {
+      const tx = pt.x * scale + offsetX;
+      const ty = pt.y * scale + offsetY;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(tx, ty, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(tx, ty, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+    if (previousTarget) drawTarget(previousTarget, "#ffd166", 10, 0.35);
+    if (currentTarget) drawTarget(currentTarget, "#8aff8a", 11, 0.9);
+
     // draw start point (origin, if visible)
     const originX = 0 * scale + offsetX;
     const originY = 0 * scale + offsetY;
@@ -720,6 +858,13 @@
       ctx.beginPath();
       ctx.arc(cx, cy, 8, 0, Math.PI * 2);
       ctx.stroke();
+    }
+
+    if (mapPath.length === 0) {
+      ctx.fillStyle = "#23305a";
+      ctx.font = "12px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("Waiting for sensor data...", rect.width / 2, rect.height / 2);
     }
   }
 
@@ -992,6 +1137,8 @@
   window.addEventListener("resize", () => {
     if (mapPath.length > 0) drawMap();
   });
+  mapCanvas.addEventListener("click", handleMapClick);
+  updateTargetLabels();
 
   // action sequence ui
   const seqPlan = [];

@@ -32,6 +32,7 @@
 #include <buzzer.h>
 #include "imu.hpp"
 #include "serial_logger.hpp"
+#include <cmath>
 
 extern volatile float acc_x, acc_y, acc_z;
 extern volatile float gyro_x, gyro_y, gyro_z;
@@ -482,6 +483,47 @@ void handle_reset_position() {
     server.send(200, "text/plain", "OK");
 }
 
+static void handle_target_get() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    char buf[160];
+    snprintf(buf, sizeof(buf), "{\"target_x\":%.3f,\"target_y\":%.3f,\"current_x\":%.3f,\"current_y\":%.3f}", target_x,
+             target_y, current_x, current_y);
+    server.send(200, "application/json", buf);
+}
+
+static void handle_target_set() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    if (!server.hasArg("x") || !server.hasArg("y")) {
+        server.send(400, "text/plain", "missing x or y");
+        return;
+    }
+
+    float x = server.arg("x").toFloat();
+    float y = server.arg("y").toFloat();
+
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        server.send(400, "text/plain", "bad coords");
+        return;
+    }
+
+    const float limit_m = 10.0f;
+    if (x < -limit_m) x = -limit_m;
+    if (x > limit_m) x = limit_m;
+    if (y < -limit_m) y = -limit_m;
+    if (y > limit_m) y = limit_m;
+
+    target_x           = x;
+    target_y           = y;
+    PositionHold_flag  = 1;
+    Stick[CONTROLMODE] = ANGLECONTROL;
+    ahrs_reset_flag    = 0;
+
+    char buf[160];
+    snprintf(buf, sizeof(buf), "{\"target_x\":%.3f,\"target_y\":%.3f,\"current_x\":%.3f,\"current_y\":%.3f}", target_x,
+             target_y, current_x, current_y);
+    server.send(200, "application/json", buf);
+}
+
 static void handle_pos_gains_get() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     float kp, ki, kd;
@@ -816,6 +858,8 @@ void rc_init(void) {
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
     server.on("/reset/position", HTTP_GET, handle_reset_position);
+    server.on("/target", HTTP_GET, handle_target_get);
+    server.on("/target", HTTP_POST, handle_target_set);
     server.on("/pos/gains", HTTP_GET, handle_pos_gains_get);
     server.on("/pos/gains", HTTP_POST, handle_pos_gains_set);
     server.on("/sequence", HTTP_POST, handle_sequence);
@@ -830,6 +874,7 @@ void rc_init(void) {
     server.on("/logs", HTTP_OPTIONS, handle_options);
     server.on("/ping", HTTP_OPTIONS, handle_options);
     server.on("/reset/position", HTTP_OPTIONS, handle_options);
+    server.on("/target", HTTP_OPTIONS, handle_options);
     server.on("/pos/gains", HTTP_OPTIONS, handle_options);
     server.on("/sequence", HTTP_OPTIONS, handle_options);
     server.on("/sequence/stop", HTTP_OPTIONS, handle_options);
