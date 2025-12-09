@@ -77,6 +77,8 @@ void hold_hover_position(void);
 float calculate_pos_kp_from_calibration(float pixels_per_meter, float settling_time, float max_tilt_deg);
 void calibrate_position_control(float physical_distance_m, float pixels_accumulated, float altitude_m);
 void reset_position_state(void);
+void set_position_hold_gains(float kp, float ki, float kd);
+void get_position_hold_gains(float& kp, float& ki, float& kd);
 
 // グローバル変数
 extern volatile uint8_t Mode;

@@ -103,7 +103,7 @@ const float Pitch_angle_td  = 0.04f;
 const float Pitch_angle_eta = 0.125f;
 
 // Altitude control PID gain
-const float alt_kp     = 0.38f;  // 5.0//soso 0.5
+const float alt_kp     = 0.45f;  // 5.0//soso 0.5
 const float alt_ti     = 10.0f;  // 200.0//soso 10.0
 const float alt_td     = 0.5f;   // 0.5//soso 0.5
 const float alt_eta    = 0.125f;
@@ -128,22 +128,15 @@ volatile float target_x                = 0;
 volatile float current_x               = 0;
 volatile float current_y               = 0;
 volatile float target_y                = 0;
-constexpr float MARGIN_OF_ERROR_METERS = 0.01f;  // deadband in meters (~50 pixels at 0.5m altitude)
-
-const float pos_x_kp     = 0.0135f;
-const float pos_x_ti     = 15.0f;
-const float pos_x_td     = 0.030f;
-const float pos_x_eta    = 0.125f;
-const float pos_x_period = 0.0025f;  // 400Hz
-
-const float pos_y_kp     = 0.0135f;
-const float pos_y_ti     = 15.0f;
-const float pos_y_td     = 0.030f;
-const float pos_y_eta    = 0.125f;
-const float pos_y_period = 0.0025f;  // 400Hz
+constexpr float MARGIN_OF_ERROR_METERS = 0.0f;  // deadband in meters (~40 px at 0.5m altitude)
 
 constexpr float POS_PIXEL_SCALE     = 0.024f;  // m/px per meter altitude
-const float POS_SCALE_BASE_ALTITUDE = 0.5f;    // fallback altitude if sensor reading invalid
+const float POS_SCALE_BASE_ALTITUDE = 0.38f;   // fallback altitude if sensor reading invalid
+volatile float Pos_kp_stick         = 0.004f;  // stick units per meter error
+volatile float Pos_ki_stick         = 0.0f;    // stick units per meter-second
+volatile float Pos_kd_stick         = 0.0f;    // stick units per m/s (velocity damping)
+constexpr float POS_CMD_LIMIT       = 0.12f;   // absolute stick limit for position loop
+constexpr float POS_INT_LIMIT       = 0.06f;   // integrator clamp in stick units
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -182,10 +175,11 @@ volatile float Roll_angle_offset = 0.0f, Pitch_angle_offset = 0.0f, Yaw_angle_of
 volatile float Elevator_center = 0.0f, Aileron_center = 0.0f, Rudder_center = 0.0f;
 
 // Machine state & flag
-float Timevalue          = 0.0f;
-volatile uint8_t Mode    = INIT_MODE;
-volatile uint8_t OldMode = INIT_MODE;
-uint8_t Control_mode     = ANGLECONTROL;
+float Timevalue                    = 0.0f;
+volatile uint8_t Mode              = INIT_MODE;
+volatile uint8_t OldMode           = INIT_MODE;
+volatile uint8_t PositionHold_flag = 0;
+uint8_t Control_mode               = ANGLECONTROL;
 // volatile uint8_t LockMode=0;
 float Motor_on_duty_threshold         = 0.1f;
 float Angle_control_on_duty_threshold = 0.5f;
@@ -198,9 +192,6 @@ uint8_t Stick_return_flag     = 0;
 uint8_t Throttle_control_mode = 0;
 uint8_t Landing_state         = 0;
 uint8_t OladRange0flag        = 0;
-// Position hold (skyhook) flag: when set, the controller will try to keep
-// the current lateral position using optical flow corrections.
-volatile uint8_t PositionHold_flag = 0;
 
 // for flip
 float FliRoll_rate_time          = 2.0;
@@ -210,9 +201,12 @@ float Flip_time                  = 2.0;
 volatile uint8_t Ahrs_reset_flag = 0;
 float T_flip;
 
-// Front ToF sensor 
-volatile int16_t front_mm;
-bool front_obstacle = false;     // front obstacle flag
+// Front ToF sensor
+volatile int16_t front_mm                    = 0;
+bool front_obstacle                          = false;  // front obstacle flag
+constexpr int FRONT_OBSTACLE_ENGAGE_MM       = 600;
+constexpr int FRONT_OBSTACLE_RELEASE_MM      = 750;
+constexpr float FRONT_OBSTACLE_BACKOFF_STICK = 0.35f;
 
 // PID object and etc.
 PID p_pid;
@@ -224,8 +218,6 @@ PID psi_pid;
 // PID alt;
 PID alt_pid;
 PID z_dot_pid;
-PID pos_x_pid;
-PID pos_y_pid;
 Filter Thrust_filtered;
 Filter Duty_fr;
 Filter Duty_fl;
@@ -262,7 +254,6 @@ void reset_rate_control(void);
 void reset_angle_control(void);
 uint8_t auto_landing(void);
 float get_trim_duty(float voltage);
-void flip(void);
 float get_rate_ref(float x);
 float calculate_pos_kp_from_calibration(float pixels_per_meter, float settling_time, float max_tilt_deg);
 void calibrate_position_control(float physical_distance_m, float pixels_accumulated, float altitude_m);
@@ -329,37 +320,6 @@ void init_copter(void) {
     start_tone();
 }
 
-// flow sensor rotation relative to body frame (degrees clockwise when looking down)
-// try 0, 90, 180, 270 depending on how the pmw3901 board is mounted
-constexpr int FLOW_ROTATION_DEG = 0;
-
-// rotate raw optical-flow counts into the body frame
-void rotate_flow_counts(int16_t in_dx, int16_t in_dy, float& out_dx, float& out_dy) {
-    switch (FLOW_ROTATION_DEG) {
-        case 0:
-            out_dx = static_cast<float>(in_dx);
-            out_dy = static_cast<float>(in_dy);
-            break;
-        case 90:
-            // sensor +x forward, +y right -> body +x forward, +y right
-            out_dx = static_cast<float>(in_dy);
-            out_dy = static_cast<float>(-in_dx);
-            break;
-        case 180:
-            out_dx = static_cast<float>(-in_dx);
-            out_dy = static_cast<float>(-in_dy);
-            break;
-        case 270:
-            out_dx = static_cast<float>(-in_dy);
-            out_dy = static_cast<float>(in_dx);
-            break;
-        default:
-            out_dx = static_cast<float>(in_dx);
-            out_dy = static_cast<float>(in_dy);
-            break;
-    }
-}
-
 void loop_400Hz(void) {
     static uint8_t led = 1;
     float sense_time;
@@ -382,13 +342,19 @@ void loop_400Hz(void) {
     static uint16_t tof_debug_counter = 0;
     tof_debug_counter++;
 
-    // measure at 10 Hz
+    // print at 10 Hz
     if (tof_debug_counter >= 40) {
         tof_debug_counter = 0;
 
-        front_mm  = tof_front_get_range();
-
-        // serial_logger print 
+        // serial_logger print
+        front_mm = tof_front_get_range();
+        if (front_mm > 0) {
+            if (front_mm < FRONT_OBSTACLE_ENGAGE_MM) {
+                front_obstacle = true;
+            } else if (front_mm > FRONT_OBSTACLE_RELEASE_MM) {
+                front_obstacle = false;
+            }
+        }
         print("front=%d mm\n", front_mm);
     }
 
@@ -451,8 +417,6 @@ void loop_400Hz(void) {
         get_command();
         angle_control();
         rate_control();
-    } else if (Mode == FLIP_MODE) {
-        flip();
     } else if (Mode == PARKING_MODE) {
         if (judge_mode_change() == 1) {
             for (int i = 0; i < 20; i++) {
@@ -500,126 +464,6 @@ void loop_400Hz(void) {
     uint32_t ce_time = micros();
     Dt_time          = ce_time - cs_time;
     OldMode          = Mode;
-}
-
-void flip(void) {
-    serial_logger_usb_println("Received flip");
-
-    float domega;
-    float flip_delay;
-    uint16_t flip_step;
-
-    Control_period = Interval_time;
-    Led_color      = FLIPCOLOR;
-
-    // Judge Mode change
-    if (judge_mode_change() == 1) Mode = AUTO_LANDING_MODE;
-    if (rc_isconnected() == 0) Mode = AUTO_LANDING_MODE;
-    if (OverG_flag == 1) Mode = PARKING_MODE;
-
-    print("Mode: %u\n", Mode);
-
-    // Flip parameter set
-    Flip_time            = 0.4;
-    Pitch_rate_reference = 0.0;
-    domega               = 0.00217f * 8.0 * PI / Flip_time / Flip_time;  // 25->22->23->225->222->221->220
-    flip_delay           = 180;
-    flip_step            = (uint16_t)(Flip_time / 0.0025f);
-    T_flip               = get_trim_duty(Voltage) * BATTERY_VOLTAGE;
-
-    // Flip Sequence
-    if (Flip_counter < flip_delay)  // 一時的な上昇
-    {
-        Flip_flag = 1;
-        // Roll_rate_reference = 0.0f;
-        if (Voltage > 3.8)
-            Thrust_command = T_flip + 0.17 * BATTERY_VOLTAGE;
-        else
-            Thrust_command = T_flip + 0.15 * BATTERY_VOLTAGE;
-        // Angle Control
-        Roll_angle_command  = 0.0;
-        Pitch_angle_command = 0.0;
-        angle_control();
-        // Rate Control
-        Yaw_rate_command = 0.0;
-        rate_control();
-        Flip_counter++;
-    } else if (Flip_counter < (flip_step / 4 + flip_delay))  // 宙返り開始(0deg-90deg)
-    {
-        Flip_flag      = 2;
-        Thrust_command = T_flip * 0.3f;  // 1.05//0.4
-        // Rate Control
-        Roll_rate_reference = Roll_rate_reference + domega;
-        Pitch_rate_command  = 0.0;
-        Yaw_rate_command    = 0.0;
-        rate_control();
-        Flip_counter++;
-    } else if (Flip_counter < (2 * flip_step / 4 + flip_delay))  // 宙返り(90deg-180deg)
-    {
-        Flip_flag      = 3;
-        Thrust_command = T_flip * 0.15f;  // 1.0//0.2
-        // Rate Control
-        Roll_rate_reference = Roll_rate_reference + domega;
-        Pitch_rate_command  = 0.0f;
-        Yaw_rate_command    = 0.0f;
-        rate_control();
-        Flip_counter++;
-    } else if (Flip_counter < (3 * flip_step / 4 + flip_delay))  // 宙返り(180deg-270deg)
-    {
-        Flip_flag      = 4;
-        Thrust_command = T_flip * 0.15f;  // 1.0//0.2
-        // Rate Control
-        Roll_rate_reference = Roll_rate_reference - domega;
-        Pitch_rate_command  = 0.0f;
-        Yaw_rate_command    = 0.0f;
-        rate_control();
-        Flip_counter++;
-    } else if (Flip_counter < (flip_step + flip_delay))  // 宙返り(270deg-360deg)
-    {
-        Flip_flag      = 5;
-        Thrust_command = T_flip * 1.0f;
-        // Rate Control
-        Roll_rate_reference = Roll_rate_reference - domega;
-        Pitch_rate_command  = 0.0f;
-        Yaw_rate_command    = 0.0f;
-        rate_control();
-        Flip_counter++;
-    } else if (Flip_counter < (flip_step + flip_delay + 10))  // 元に戻す準備
-    {
-        Flip_flag = 6;
-        if (Ahrs_reset_flag == 0) {
-            Ahrs_reset_flag = 1;
-            ahrs_reset();
-        }
-        Thrust_command = T_flip + 0.18f * BATTERY_VOLTAGE;
-        // Rate Control
-        Roll_rate_reference = 0.0f;
-        Pitch_rate_command  = 0.0f;
-        Yaw_rate_command    = 0.0f;
-        rate_control();
-
-        // Angle PID Reset
-        phi_pid.reset();
-        theta_pid.reset();
-
-        Flip_counter++;
-    } else if (Flip_counter < (flip_step + flip_delay + 200))  // 連続Flipの抑制
-    {
-        Flip_flag = 0;
-        // Get command
-        get_command();
-        // Angle Control
-        angle_control();
-        // Rate Control
-        rate_control();
-        Flip_counter++;
-    } else {
-        // Return to Flight Mode
-        Flip_flag       = 0;
-        Ahrs_reset_flag = 0;
-        Flip_counter    = 0;
-        Mode            = FLIGHT_MODE;
-    }
 }
 
 uint8_t judge_mode_change(void) {
@@ -680,10 +524,6 @@ void control_init(void) {
     alt_pid.set_parameter(alt_kp, alt_ti, alt_td, alt_eta, alt_period);
     z_dot_pid.set_parameter(z_dot_kp, z_dot_ti, z_dot_td, alt_eta, alt_period);
 
-    // Position control
-    pos_x_pid.set_parameter(pos_x_kp, pos_x_ti, pos_x_td, pos_x_eta, pos_x_period);
-    pos_y_pid.set_parameter(pos_y_kp, pos_y_ti, pos_y_td, pos_y_eta, pos_y_period);
-
     Duty_fl.set_parameter(0.003, Control_period);
     Duty_fr.set_parameter(0.003, Control_period);
     Duty_rl.set_parameter(0.003, Control_period);
@@ -729,194 +569,6 @@ void get_command(void) {
     else
         Throttle_control_mode = 0;
 
-    // thrust control
-    thlo = Stick[THROTTLE];
-
-    if (Throttle_control_mode == 0) {
-        // manual throttle
-        if (thlo < 0.0f) thlo = 0.0f;
-        if (thlo > 1.0f) thlo = 1.0f;
-        if ((-0.2f < thlo) && (thlo < 0.2f)) thlo = 0.0f;  // deadband
-        th = (get_trim_duty(Voltage) + (thlo - 0.4f)) * BATTERY_VOLTAGE;
-        if (th < 0.0f) th = 0.0f;
-        Thrust_command = Thrust_filtered.update(th, Interval_time);
-    } else if (Throttle_control_mode == 1) {
-        // auto throttle altitude control
-        Alt_flag = 1;
-        if (Auto_takeoff_counter < 500) {
-            Thrust0 = (float)Auto_takeoff_counter / 1000.0f;
-            if (Thrust0 > get_trim_duty(3.8f)) Thrust0 = get_trim_duty(3.8f);
-            Auto_takeoff_counter++;
-        } else if (Auto_takeoff_counter < 1000) {
-            Thrust0 = (float)Auto_takeoff_counter / 1000.0f;
-            if (Thrust0 > get_trim_duty(Voltage)) Thrust0 = get_trim_duty(Voltage);
-            Auto_takeoff_counter++;
-        } else {
-            Thrust0 = get_trim_duty(Voltage);
-        }
-
-        if ((-0.2f < thlo) && (thlo < 0.2f)) thlo = 0.0f;
-        Alt_ref = Alt_ref + thlo * 0.001f;
-        if (Alt_ref > ALT_REF_MAX) Alt_ref = ALT_REF_MAX;
-        if (Alt_ref < ALT_REF_MIN) Alt_ref = ALT_REF_MIN;
-        if ((Range0flag > OladRange0flag) || (Range0flag == RNAGE0FLAG_MAX)) {
-            Thrust0        = Thrust0 - 0.02f;
-            OladRange0flag = Range0flag;
-        }
-        Thrust_command = Thrust0 * BATTERY_VOLTAGE;
-
-
-        // check for obstacle in front
-        if(front_mm > 0 && front_mm < 800){ // check if > 0 because 0 is the default (really far) value
-            Stick[ELEVATOR] = 0.1;
-            front_obstacle = true;
-        } else if(front_mm > 0 && front_mm < 1500) {
-            Stick[ELEVATOR] = 0.005; 
-            front_obstacle = true;
-        } else if(front_obstacle && front_mm > 1800){
-                auto_takeoff_and_hover(0.5);
-                front_obstacle = false;
-        }
-
-    }
-
-    if (Control_mode == ANGLECONTROL) {
-        // base commands from sticks
-        Roll_angle_command = 0.4f * Stick[AILERON];
-        if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
-        if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
-
-        Pitch_angle_command = 0.4f * Stick[ELEVATOR];
-        if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
-        if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
-
-        // simple body-frame position hold
-        if (PositionHold_flag == 1 && Mode == FLIGHT_MODE) {
-            // error: where we want to be minus where we are, in the same units as current_x/current_y
-            float err_x = target_x - current_x;  // forward/back
-            float err_y = target_y - current_y;  // left/right
-
-            float distance_magnitude = sqrtf(err_x * err_x + err_y * err_y);
-
-            static bool target_reached_logged = false;
-            static uint16_t deadband_counter  = 0;
-
-            if (distance_magnitude > MARGIN_OF_ERROR_METERS) {
-                target_reached_logged = false;
-                deadband_counter      = 0;
-
-                float roll_correction  = pos_x_pid.update(err_x, Interval_time);
-                float pitch_correction = pos_y_pid.update(err_y, Interval_time);
-
-                // clamp corrections
-                const float MAX_ROLL_CORRECTION  = 0.15f;
-                const float MAX_PITCH_CORRECTION = 0.15f;
-                if (roll_correction > MAX_ROLL_CORRECTION) roll_correction = MAX_ROLL_CORRECTION;
-                if (roll_correction < -MAX_ROLL_CORRECTION) roll_correction = -MAX_ROLL_CORRECTION;
-                if (pitch_correction > MAX_PITCH_CORRECTION) pitch_correction = MAX_PITCH_CORRECTION;
-                if (pitch_correction < -MAX_PITCH_CORRECTION) pitch_correction = -MAX_PITCH_CORRECTION;
-
-                // apply like "virtual stick" in the same direction as stick input
-                Roll_angle_command += roll_correction;
-                Pitch_angle_command += pitch_correction;
-
-                if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
-                if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
-                if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
-                if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
-
-                static float prev_distance          = 0.0f;
-                static uint16_t convergence_counter = 0;
-                static uint16_t divergence_counter  = 0;
-                static uint16_t debug_counter       = 0;
-
-                if (prev_distance > 0.0f) {
-                    if (distance_magnitude < prev_distance) {
-                        convergence_counter++;
-                        divergence_counter = 0;
-                    } else if (distance_magnitude > prev_distance) {
-                        divergence_counter++;
-                        convergence_counter = 0;
-                    }
-                }
-
-                // debug_counter++;
-                // if (debug_counter >= 40) {
-                //     debug_counter         = 0;
-                //     float distance_change = distance_magnitude - prev_distance;
-
-                //     print(
-                //         "POS CTRL: err_x=%.3f m err_y=%.3f m | corr: roll=%.4f pitch=%.4f | "
-                //         "cmd: roll=%.3f pitch=%.3f\r\n",
-                //         err_x, err_y, roll_correction, pitch_correction, Roll_angle_command, Pitch_angle_command);
-
-                //     print("VERIFY: dist=%.3f m Δ=%.3f m conv=%u div=%u\r\n", distance_magnitude, distance_change,
-                //           convergence_counter, divergence_counter);
-
-                //     if (divergence_counter > 20) {
-                //         print("WARNING: Position diverging for %u cycles - check sign/scale\r\n", divergence_counter);
-                //     }
-                // }
-
-                prev_distance = distance_magnitude;
-
-            } else {
-                deadband_counter++;
-                if (deadband_counter > 800) {
-                    pos_x_pid.i_reset();
-                    pos_y_pid.i_reset();
-                    deadband_counter = 0;
-                }
-
-                if (!target_reached_logged) {
-                    print(
-                        "POS HOLD: target reached (err_x=%.3f m, err_y=%.3f m, dist=%.3f m) | "
-                        "target=(%.3f, %.3f) current=(%.3f, %.3f)\r\n",
-                        err_x, err_y, distance_magnitude, target_x, target_y, current_x, current_y);
-                    target_reached_logged = true;
-                }
-            }
-        } else if (PositionHold_flag == 1 && Mode != FLIGHT_MODE) {
-            pos_x_pid.reset();
-            pos_y_pid.reset();
-        }
-    } else if (Control_mode == RATECONTROL) {
-        Roll_rate_reference  = get_rate_ref(Stick[AILERON]);
-        Pitch_rate_reference = get_rate_ref(Stick[ELEVATOR]);
-    }
-
-    Yaw_angle_command = Stick[RUDDER];
-    if (Yaw_angle_command < -1.0f) Yaw_angle_command = -1.0f;
-    if (Yaw_angle_command > 1.0f) Yaw_angle_command = 1.0f;
-    Yaw_rate_reference = 2.0f * PI * (Yaw_angle_command - Rudder_center);
-
-    if (Flip_flag == 0) {
-        Flip_flag = get_flip_button();
-        if (Flip_flag == 1) Mode = FLIP_MODE;
-    }
-}
-
-#if 0
-float get_trim_duty(float voltage) {
-    return -0.2448f * voltage + 1.5892f;
-}
-
-void get_command(void) {
-    static uint16_t stick_count = 0;
-    static float auto_throttle  = 0.0f;
-    static float old_alt        = 0.0;
-    float th, thlo;
-    float throttle_limit = 0.7;
-    float thrust_max;
-
-    Control_mode = Stick[CONTROLMODE];
-    if ((uint8_t)Stick[ALTCONTROLMODE] == AUTO_ALT)
-        Throttle_control_mode = 1;
-    else if ((uint8_t)Stick[ALTCONTROLMODE] == MANUAL_ALT)
-        Throttle_control_mode = 0;
-    else
-        Throttle_control_mode = 0;
-
     // Thrust control
     thlo = Stick[THROTTLE];
     // thlo = thlo/throttle_limit;
@@ -926,8 +578,8 @@ void get_command(void) {
         if (thlo < 0.0) thlo = 0.0;
         if (thlo > 1.0f) thlo = 1.0f;
         if ((-0.2 < thlo) && (thlo < 0.2)) thlo = 0.0f;  // 不感帯
-        // Throttle curve conversion　スロットルカーブ補正
-        th             = (4.13e-3 + 3.3f * thlo - 5.44f * thlo * thlo + 3.13f * thlo * thlo * thlo) * BATTERY_VOLTAGE;
+        th = (get_trim_duty(Voltage) + (thlo - 0.4)) * BATTERY_VOLTAGE;
+        if (th < 0) th = 0.0f;
         Thrust_command = Thrust_filtered.update(th, Interval_time);
     } else if (Throttle_control_mode == 1) {
         // Auto Throttle Altitude Control
@@ -955,12 +607,23 @@ void get_command(void) {
         Thrust_command = Thrust0 * BATTERY_VOLTAGE;
     }
 
-    Roll_angle_command = 0.4 * Stick[AILERON];
-    if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
-    if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
-    Pitch_angle_command = 0.4 * Stick[ELEVATOR];
-    if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
-    if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+    float elevator_cmd = Stick[ELEVATOR];
+    if (front_obstacle && elevator_cmd < FRONT_OBSTACLE_BACKOFF_STICK) {
+        elevator_cmd = FRONT_OBSTACLE_BACKOFF_STICK;
+    }
+
+    if (Control_mode == ANGLECONTROL) {
+        Roll_angle_command = 0.4 * Stick[AILERON];
+        if (Roll_angle_command < -1.0f) Roll_angle_command = -1.0f;
+        if (Roll_angle_command > 1.0f) Roll_angle_command = 1.0f;
+        Pitch_angle_command = 0.4 * elevator_cmd;
+        if (Pitch_angle_command < -1.0f) Pitch_angle_command = -1.0f;
+        if (Pitch_angle_command > 1.0f) Pitch_angle_command = 1.0f;
+    } else if (Control_mode == RATECONTROL) {
+        Roll_rate_reference  = get_rate_ref(Stick[AILERON]);
+        Pitch_rate_reference = get_rate_ref(elevator_cmd);
+        // USBSerial.printf("%9.6f\n\r", Pitch_rate_reference*180.0f/PI);
+    }
 
     Yaw_angle_command = Stick[RUDDER];
     if (Yaw_angle_command < -1.0f) Yaw_angle_command = -1.0f;
@@ -968,18 +631,12 @@ void get_command(void) {
     // Yaw control
     Yaw_rate_reference = 2.0f * PI * (Yaw_angle_command - Rudder_center);
 
-    if (Control_mode == RATECONTROL) {
-        Roll_rate_reference  = 240 * PI / 180 * Roll_angle_command;
-        Pitch_rate_reference = 240 * PI / 180 * Pitch_angle_command;
-    }
-
     // flip button check
     if (Flip_flag == 0 /*&& Throttle_control_mode == 0*/) {
         Flip_flag = get_flip_button();
         if (Flip_flag == 1) Mode = FLIP_MODE;
     }
 }
-#endif
 
 uint8_t auto_landing(void) {
     // Auto Landing
@@ -1144,9 +801,6 @@ void reset_rate_control(void) {
     q_pid.reset();
     r_pid.reset();
     alt_pid.reset();
-    z_dot_pid.reset();
-    pos_x_pid.reset();
-    pos_y_pid.reset();
     Roll_rate_reference  = 0.0f;
     Pitch_rate_reference = 0.0f;
     Yaw_rate_reference   = 0.0f;
@@ -1184,6 +838,84 @@ void reset_angle_control(void) {
     /////////////////////////////////////
 }
 
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static float clamp_gain(float v, float lo, float hi) {
+    if (isnan(v) || isinf(v)) return lo;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void update_position_hold(float dt_sec) {
+    static float pos_i_x = 0.0f;
+    static float pos_i_y = 0.0f;
+    static float last_x  = 0.0f;
+    static float last_y  = 0.0f;
+
+    if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0) {
+        pos_i_x = 0.0f;
+        pos_i_y = 0.0f;
+        last_x  = current_x;
+        last_y  = current_y;
+        return;
+    }
+
+    float vel_x = (current_x - last_x) / dt_sec;
+    float vel_y = (current_y - last_y) / dt_sec;
+    last_x      = current_x;
+    last_y      = current_y;
+
+    float err_x = target_x - current_x;
+    float err_y = target_y - current_y;
+
+    if (fabsf(err_x) < MARGIN_OF_ERROR_METERS) err_x = 0.0f;
+    if (fabsf(err_y) < MARGIN_OF_ERROR_METERS) err_y = 0.0f;
+
+    if (front_obstacle) {
+        pos_i_x             = 0.0f;
+        pos_i_y             = 0.0f;
+        float back_cmd      = clampf(FRONT_OBSTACLE_BACKOFF_STICK, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+        Roll_angle_command  = 0.0f;
+        Pitch_angle_command = back_cmd;
+        Control_mode        = ANGLECONTROL;
+        return;
+    }
+
+    // light bleed to keep the integrator from driving oscillations
+    pos_i_x *= 0.99f;
+    pos_i_y *= 0.99f;
+
+    pos_i_x = clampf(pos_i_x + err_x * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
+    pos_i_y = clampf(pos_i_y + err_y * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
+
+    float roll_cmd  = Pos_kp_stick * err_x + Pos_ki_stick * pos_i_x - Pos_kd_stick * vel_x;
+    float pitch_cmd = Pos_kp_stick * err_y + Pos_ki_stick * pos_i_y - Pos_kd_stick * vel_y;
+
+    roll_cmd  = clampf(roll_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+    pitch_cmd = clampf(pitch_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+
+    Roll_angle_command  = roll_cmd;
+    Pitch_angle_command = pitch_cmd;
+    Control_mode        = ANGLECONTROL;
+}
+
+void set_position_hold_gains(float kp, float ki, float kd) {
+    Pos_kp_stick = clamp_gain(kp, 0.0f, 0.6f);
+    Pos_ki_stick = clamp_gain(ki, 0.0f, 0.2f);
+    Pos_kd_stick = clamp_gain(kd, 0.0f, 0.3f);
+}
+
+void get_position_hold_gains(float& kp, float& ki, float& kd) {
+    kp = Pos_kp_stick;
+    ki = Pos_ki_stick;
+    kd = Pos_kd_stick;
+}
+
 void angle_control(void) {
     float phi_err, theta_err, alt_err;
     static uint8_t cnt   = 0;
@@ -1201,6 +933,8 @@ void angle_control(void) {
         // Altitude Control PID
         alt_err = Alt_ref - Altitude2;
         if (Alt_flag >= 1) Z_dot_ref = alt_pid.update(alt_err, Interval_time);
+
+        update_position_hold(Interval_time);
 
         if (Control_mode == ANGLECONTROL) {
             // Angle Control
@@ -1292,29 +1026,25 @@ void motor_stop(void) {
     set_duty_rl(0.0);
 }
 
-void auto_takeoff_and_hover(float target_altitude) {
-    Alt_ref = target_altitude;
-
-    Mode                  = FLIGHT_MODE;
-    Stick[ALTCONTROLMODE] = AUTO_ALT;
-
-    // initialize the lateral hold target to the current sensor-based position
-    target_x = current_x;
-    target_y = current_y;
-    // enable position hold (skyhook)
-    PositionHold_flag = 1;
-    // reset position PID controllers
-    pos_x_pid.reset();
-    pos_y_pid.reset();
-}
-
 void reset_position_state(void) {
     current_x = 0.0f;
     current_y = 0.0f;
     target_x  = 0.0f;
     target_y  = 0.0f;
-    pos_x_pid.reset();
-    pos_y_pid.reset();
+}
+
+void auto_takeoff_and_hover(float target_altitude) {
+    reset_position_state();
+
+    Alt_ref = target_altitude;
+
+    Mode                  = FLIGHT_MODE;
+    Stick[ALTCONTROLMODE] = AUTO_ALT;
+    PositionHold_flag     = 1;
+
+    // initialize the lateral hold target to the current sensor-based position
+    target_x = current_x;
+    target_y = current_y;
 }
 
 int8_t sign(float x) {

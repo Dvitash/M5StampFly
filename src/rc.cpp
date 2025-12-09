@@ -482,6 +482,32 @@ void handle_reset_position() {
     server.send(200, "text/plain", "OK");
 }
 
+static void handle_pos_gains_get() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    float kp, ki, kd;
+    get_position_hold_gains(kp, ki, kd);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"kp\":%.5f,\"ki\":%.5f,\"kd\":%.5f}", kp, ki, kd);
+    server.send(200, "application/json", buf);
+}
+
+static void handle_pos_gains_set() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    float kp, ki, kd;
+    get_position_hold_gains(kp, ki, kd);
+
+    if (server.hasArg("kp")) kp = server.arg("kp").toFloat();
+    if (server.hasArg("ki")) ki = server.arg("ki").toFloat();
+    if (server.hasArg("kd")) kd = server.arg("kd").toFloat();
+
+    set_position_hold_gains(kp, ki, kd);
+    get_position_hold_gains(kp, ki, kd);
+
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"kp\":%.5f,\"ki\":%.5f,\"kd\":%.5f}", kp, ki, kd);
+    server.send(200, "application/json", buf);
+}
+
 // -------- action sequence support --------
 enum class SeqActionType : uint8_t { MOVE, WAIT, ALT, LAND };
 
@@ -790,6 +816,8 @@ void rc_init(void) {
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
     server.on("/reset/position", HTTP_GET, handle_reset_position);
+    server.on("/pos/gains", HTTP_GET, handle_pos_gains_get);
+    server.on("/pos/gains", HTTP_POST, handle_pos_gains_set);
     server.on("/sequence", HTTP_POST, handle_sequence);
     server.on("/sequence/stop", HTTP_GET, handle_sequence_stop);
 
@@ -802,6 +830,7 @@ void rc_init(void) {
     server.on("/logs", HTTP_OPTIONS, handle_options);
     server.on("/ping", HTTP_OPTIONS, handle_options);
     server.on("/reset/position", HTTP_OPTIONS, handle_options);
+    server.on("/pos/gains", HTTP_OPTIONS, handle_options);
     server.on("/sequence", HTTP_OPTIONS, handle_options);
     server.on("/sequence/stop", HTTP_OPTIONS, handle_options);
 

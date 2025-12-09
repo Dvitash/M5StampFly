@@ -186,6 +186,23 @@
 
   <div class="card">
     <div class="row" style="justify-content: space-between; align-items: baseline">
+      <h3 style="margin: 0">Position hold gains</h3>
+      <div class="tiny hint">hot reload (no flash)</div>
+    </div>
+    <div class="row">
+      <label>kp<input type="number" id="posKp" value="0.05" step="0.01" min="0" max="0.6" /></label>
+      <label>ki<input type="number" id="posKi" value="0.00" step="0.005" min="0" max="0.2" /></label>
+      <label>kd<input type="number" id="posKd" value="0.03" step="0.005" min="0" max="0.3" /></label>
+    </div>
+    <div class="row">
+      <button onclick="applyPosGains()">Apply gains</button>
+      <button onclick="loadPosGains()">Load from drone</button>
+    </div>
+    <div class="tiny hint">applies immediately; limits enforced on the drone</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; align-items: baseline">
       <h3 style="margin: 0">Camera</h3>
       <div class="tiny hint">status: <span id="cameraStatus">disabled</span></div>
     </div>
@@ -290,6 +307,41 @@
   }
   function sendStick(ail, ele, rud, thr) {
     http(`/stick`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ail, ele, rud, thr }) });
+  }
+
+  async function loadPosGains() {
+    try {
+      const r = await http(`/pos/gains`);
+      if (!r.ok) throw 0;
+      const d = await r.json();
+      el("posKp").value = d.kp.toFixed(3);
+      el("posKi").value = d.ki.toFixed(3);
+      el("posKd").value = d.kd.toFixed(3);
+      log(`pos gains load kp=${d.kp.toFixed(3)} ki=${d.ki.toFixed(3)} kd=${d.kd.toFixed(3)}`);
+    } catch (e) {
+      log("pos gains load failed");
+    }
+  }
+
+  async function applyPosGains() {
+    const kp = Number(el("posKp").value);
+    const ki = Number(el("posKi").value);
+    const kd = Number(el("posKd").value);
+    const body = new URLSearchParams();
+    if (Number.isFinite(kp)) body.set("kp", kp);
+    if (Number.isFinite(ki)) body.set("ki", ki);
+    if (Number.isFinite(kd)) body.set("kd", kd);
+    try {
+      const r = await http(`/pos/gains`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString() });
+      if (!r.ok) throw 0;
+      const d = await r.json();
+      el("posKp").value = d.kp.toFixed(3);
+      el("posKi").value = d.ki.toFixed(3);
+      el("posKd").value = d.kd.toFixed(3);
+      log(`pos gains set kp=${d.kp.toFixed(3)} ki=${d.ki.toFixed(3)} kd=${d.kd.toFixed(3)}`);
+    } catch (e) {
+      log("pos gains set failed");
+    }
   }
 
   // arrow key nudges
@@ -1070,6 +1122,9 @@
     }
   }
   renderSeq();
+
+  // load current gains on startup
+  loadPosGains();
 
   // camera streaming
   let cameraStreamActive = false;
