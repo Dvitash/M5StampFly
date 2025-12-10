@@ -80,6 +80,8 @@ extern volatile int16_t Range;
 extern volatile float Altitude;
 extern volatile float Altitude2;
 extern volatile float Alt_velocity;
+extern volatile float Vel_x;
+extern volatile float Vel_y;
 extern volatile uint8_t Alt_control_ok;
 extern volatile float Voltage;
 extern float Acc_norm;

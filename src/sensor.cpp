@@ -44,6 +44,8 @@ Filter raw_gx_filter;
 Filter raw_gy_filter;
 Filter raw_gz_filter;
 Filter alt_filter;
+Filter vel_x_filter;
+Filter vel_y_filter;
 
 // Sensor data
 volatile float Roll_angle = 0.0f, Pitch_angle = 0.0f, Yaw_angle = 0.0f;
@@ -62,6 +64,8 @@ volatile int16_t RangeFront    = 0;
 volatile float Altitude        = 0.0f;
 volatile float Altitude2       = 0.0f;
 volatile float Alt_velocity    = 0.0f;
+volatile float Vel_x           = 0.0f;
+volatile float Vel_y           = 0.0f;
 volatile float Az              = 0.0;
 volatile float Az_bias         = 0.0;
 int16_t deltaX, deltaY;
@@ -177,6 +181,8 @@ void sensor_init() {
     raw_az_d_filter.set_parameter(0.1, 0.0025);  // alt158
     az_filter.set_parameter(0.1, 0.0025);        // alt158
     alt_filter.set_parameter(0.005, 0.0025);
+    vel_x_filter.set_parameter(0.02f, 0.0025f);
+    vel_y_filter.set_parameter(0.02f, 0.0025f);
 }
 
 float sensor_read(void) {
@@ -254,6 +260,10 @@ float sensor_read(void) {
 
         az_filter.reset();
         alt_filter.reset();
+        vel_x_filter.reset();
+        vel_y_filter.reset();
+        Vel_x = 0.0f;
+        Vel_y = 0.0f;
 
         acc_filter.reset();
     }
@@ -273,6 +283,42 @@ float sensor_read(void) {
         Roll_angle  = Drone_ahrs.getPitch() * (float)DEG_TO_RAD;
         Pitch_angle = Drone_ahrs.getRoll() * (float)DEG_TO_RAD;
         Yaw_angle   = -Drone_ahrs.getYaw() * (float)DEG_TO_RAD;
+
+        bool gotMotion = false;
+        flow.readMotion(deltaX, deltaY, gotMotion);
+
+        if (gotMotion && Altitude2 > 0.1f) {
+            float meters_per_pixel = POS_PIXEL_SCALE * ((Altitude2 > 0.05f) ? Altitude2 : POS_SCALE_BASE_ALTITUDE);
+
+            float body_dx_m = static_cast<float>(deltaX) * meters_per_pixel;
+            float body_dy_m = static_cast<float>(deltaY) * meters_per_pixel;
+
+            float yaw = Yaw_angle + PI;
+            if (yaw > PI) yaw -= 2.0f * PI;
+            if (yaw < -PI) yaw += 2.0f * PI;
+
+            float cos_yaw = cosf(yaw);
+            float sin_yaw = sinf(yaw);
+
+            float world_dx = cos_yaw * body_dx_m - sin_yaw * body_dy_m;
+            float world_dy = sin_yaw * body_dx_m + cos_yaw * body_dy_m;
+
+            float dt = opt_interval;
+            if (dt < 1.0e-4f) dt = sens_interval;
+            opt_interval = 0.0f;
+
+            current_x += world_dx;
+            current_y += world_dy;
+
+            float raw_vel_x = world_dx / dt;
+            float raw_vel_y = world_dy / dt;
+            Vel_x           = vel_x_filter.update(raw_vel_x, dt);
+            Vel_y           = vel_y_filter.update(raw_vel_y, dt);
+        } else {
+            Vel_x        = vel_x_filter.update(0.0f, sens_interval);
+            Vel_y        = vel_y_filter.update(0.0f, sens_interval);
+            opt_interval = 0.0f;
+        }
 
         // for debug
         // USBSerial.printf("%6.3f %7.4f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f\n\r",

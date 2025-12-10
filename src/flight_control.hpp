@@ -167,6 +167,8 @@ extern uint8_t last_ahrs_reset_flag;
 extern PMW3901 flow;
 
 // position tracking from sensor data
+extern const float POS_PIXEL_SCALE;
+extern const float POS_SCALE_BASE_ALTITUDE;
 extern volatile float current_x;
 extern volatile float current_y;
 #endif

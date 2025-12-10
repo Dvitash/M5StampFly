@@ -47,6 +47,7 @@
 #include "buzzer.h"
 #include "serial_logger.hpp"
 #include "tof.hpp"
+#include <math.h>
 
 // モータPWM出力Pinのアサイン
 // Motor PWM Pin
@@ -130,13 +131,13 @@ volatile float current_y               = 0;
 volatile float target_y                = 0;
 constexpr float MARGIN_OF_ERROR_METERS = 0.0f;  // deadband in meters (~40 px at 0.5m altitude)
 
-constexpr float POS_PIXEL_SCALE     = 0.024f;  // m/px per meter altitude
+const float POS_PIXEL_SCALE         = 0.024f;  // m/px per meter altitude
 const float POS_SCALE_BASE_ALTITUDE = 0.38f;   // fallback altitude if sensor reading invalid
-volatile float Pos_kp_stick         = 0.004f;  // stick units per meter error
+volatile float Pos_kp_stick         = 0.005f;  // stick units per meter error
 volatile float Pos_ki_stick         = 0.0f;    // stick units per meter-second
-volatile float Pos_kd_stick         = 0.0f;    // stick units per m/s (velocity damping)
+volatile float Pos_kd_stick         = 0.002f;  // stick units per m/s (velocity damping)
 constexpr float POS_CMD_LIMIT       = 0.12f;   // absolute stick limit for position loop
-constexpr float POS_INT_LIMIT       = 0.06f;   // integrator clamp in stick units
+constexpr float POS_INT_LIMIT       = 0.02f;   // integrator clamp in stick units
 
 // Counter
 uint8_t AngleControlCounter   = 0;
@@ -361,30 +362,6 @@ void loop_400Hz(void) {
     // led drive
     led_drive();
 
-    if (Mode > AVERAGE_MODE) {
-        int16_t deltaX = 0, deltaY = 0;
-        bool gotMotion = false;
-
-        flow.readMotion(deltaX, deltaY, gotMotion);
-
-        if (gotMotion && Altitude2 > 0.1f) {
-            // ignore flow when yaw rate is significant (likely mostly rotational flow)
-            const float yaw_rate_threshold = 0.3f;  // rad/s ~ 17 deg/s
-            float yaw_rate_abs             = fabsf(Yaw_rate);
-
-            if (yaw_rate_abs < yaw_rate_threshold) {
-                float meters_per_pixel = POS_PIXEL_SCALE * Altitude2;
-
-                // for now, no sensor rotation: in = out
-                float body_dx_counts = static_cast<float>(deltaX);
-                float body_dy_counts = static_cast<float>(deltaY);
-
-                current_x += body_dx_counts * meters_per_pixel;
-                current_y += body_dy_counts * meters_per_pixel;
-            }
-        }
-    }
-
     if (Mode == INIT_MODE) {
         motor_stop();
         Elevator_center    = 0.0f;
@@ -608,9 +585,9 @@ void get_command(void) {
     }
 
     float elevator_cmd = Stick[ELEVATOR];
-    if (front_obstacle && elevator_cmd < FRONT_OBSTACLE_BACKOFF_STICK) {
-        elevator_cmd = FRONT_OBSTACLE_BACKOFF_STICK;
-    }
+    // if (front_obstacle && elevator_cmd < FRONT_OBSTACLE_BACKOFF_STICK) {
+    //     elevator_cmd = FRONT_OBSTACLE_BACKOFF_STICK;
+    // }
 
     if (Control_mode == ANGLECONTROL) {
         Roll_angle_command = 0.4 * Stick[AILERON];
@@ -852,10 +829,11 @@ static float clamp_gain(float v, float lo, float hi) {
 }
 
 static void update_position_hold(float dt_sec) {
-    static float pos_i_x = 0.0f;
-    static float pos_i_y = 0.0f;
-    static float last_x  = 0.0f;
-    static float last_y  = 0.0f;
+    static float pos_i_x  = 0.0f;
+    static float pos_i_y  = 0.0f;
+    static float last_x   = 0.0f;
+    static float last_y   = 0.0f;
+    static float steady_t = 0.0f;
 
     if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0) {
         pos_i_x = 0.0f;
@@ -865,10 +843,27 @@ static void update_position_hold(float dt_sec) {
         return;
     }
 
-    float vel_x = (current_x - last_x) / dt_sec;
-    float vel_y = (current_y - last_y) / dt_sec;
-    last_x      = current_x;
-    last_y      = current_y;
+    bool stick_active = (fabsf(Stick[AILERON]) > 0.1f) || (fabsf(Stick[ELEVATOR]) > 0.1f);
+    if (stick_active) {
+        pos_i_x = 0.0f;
+        pos_i_y = 0.0f;
+        last_x  = current_x;
+        last_y  = current_y;
+        return;
+    }
+
+    float vel_x_meas = Vel_x;
+    float vel_y_meas = Vel_y;
+    if (!isfinite(vel_x_meas)) vel_x_meas = 0.0f;
+    if (!isfinite(vel_y_meas)) vel_y_meas = 0.0f;
+
+    float vel_x_est = (current_x - last_x) / dt_sec;
+    float vel_y_est = (current_y - last_y) / dt_sec;
+    last_x          = current_x;
+    last_y          = current_y;
+
+    float vel_x = 0.85f * vel_x_meas + 0.15f * vel_x_est;
+    float vel_y = 0.85f * vel_y_meas + 0.15f * vel_y_est;
 
     float err_x = target_x - current_x;
     float err_y = target_y - current_y;
@@ -876,28 +871,64 @@ static void update_position_hold(float dt_sec) {
     if (fabsf(err_x) < MARGIN_OF_ERROR_METERS) err_x = 0.0f;
     if (fabsf(err_y) < MARGIN_OF_ERROR_METERS) err_y = 0.0f;
 
-    if (front_obstacle) {
-        pos_i_x             = 0.0f;
-        pos_i_y             = 0.0f;
-        float back_cmd      = clampf(FRONT_OBSTACLE_BACKOFF_STICK, -POS_CMD_LIMIT, POS_CMD_LIMIT);
-        Roll_angle_command  = 0.0f;
-        Pitch_angle_command = back_cmd;
-        Control_mode        = ANGLECONTROL;
-        return;
-    }
+    // if (front_obstacle) {
+    //     pos_i_x             = 0.0f;
+    //     pos_i_y             = 0.0f;
+    //     float back_cmd      = clampf(FRONT_OBSTACLE_BACKOFF_STICK, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+    //     Roll_angle_command  = 0.0f;
+    //     Pitch_angle_command = back_cmd;
+    //     Control_mode        = ANGLECONTROL;
+    //     return;
+    // }
+
+    float decel_band   = 0.10f;
+    float gain_scale_x = clampf(fabsf(err_x) / decel_band, 0.3f, 1.0f);
+    float gain_scale_y = clampf(fabsf(err_y) / decel_band, 0.3f, 1.0f);
 
     // light bleed to keep the integrator from driving oscillations
-    pos_i_x *= 0.99f;
-    pos_i_y *= 0.99f;
+    pos_i_x *= 0.95f;
+    pos_i_y *= 0.95f;
 
-    pos_i_x = clampf(pos_i_x + err_x * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
-    pos_i_y = clampf(pos_i_y + err_y * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
+    float pos_i_x_next = clampf(pos_i_x + err_x * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
+    float pos_i_y_next = clampf(pos_i_y + err_y * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
 
-    float roll_cmd  = Pos_kp_stick * err_x + Pos_ki_stick * pos_i_x - Pos_kd_stick * vel_x;
-    float pitch_cmd = Pos_kp_stick * err_y + Pos_ki_stick * pos_i_y - Pos_kd_stick * vel_y;
+    float roll_cmd_raw =
+        (Pos_kp_stick * gain_scale_x) * err_x + Pos_ki_stick * pos_i_x_next - (Pos_kd_stick * gain_scale_x) * vel_x;
+    float pitch_cmd_raw =
+        (Pos_kp_stick * gain_scale_y) * err_y + Pos_ki_stick * pos_i_y_next - (Pos_kd_stick * gain_scale_y) * vel_y;
+
+    float roll_cmd  = clampf(roll_cmd_raw, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+    float pitch_cmd = clampf(pitch_cmd_raw, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+
+    bool allow_int_x =
+        fabsf(roll_cmd_raw - roll_cmd) < 1e-5f || ((roll_cmd_raw > roll_cmd) ? (err_x < 0.0f) : (err_x > 0.0f));
+    bool allow_int_y =
+        fabsf(pitch_cmd_raw - pitch_cmd) < 1e-5f || ((pitch_cmd_raw > pitch_cmd) ? (err_y < 0.0f) : (err_y > 0.0f));
+
+    if (allow_int_x) pos_i_x = pos_i_x_next;
+    if (allow_int_y) pos_i_y = pos_i_y_next;
+
+    bool steady = fabsf(err_x) < 0.02f && fabsf(err_y) < 0.02f && fabsf(vel_x) < 0.05f && fabsf(vel_y) < 0.05f;
+    steady_t    = steady ? (steady_t + dt_sec) : 0.0f;
+    if (steady_t > 0.5f) {
+        pos_i_x = 0.0f;
+        pos_i_y = 0.0f;
+        last_x  = current_x;
+        last_y  = current_y;
+    }
 
     roll_cmd  = clampf(roll_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
     pitch_cmd = clampf(pitch_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
+
+    static float prev_roll_cmd  = 0.0f;
+    static float prev_pitch_cmd = 0.0f;
+    float max_delta             = 0.02f;
+    float roll_step             = clampf(roll_cmd - prev_roll_cmd, -max_delta, max_delta);
+    float pitch_step            = clampf(pitch_cmd - prev_pitch_cmd, -max_delta, max_delta);
+    roll_cmd                    = prev_roll_cmd + roll_step;
+    pitch_cmd                   = prev_pitch_cmd + pitch_step;
+    prev_roll_cmd               = roll_cmd;
+    prev_pitch_cmd              = pitch_cmd;
 
     Roll_angle_command  = roll_cmd;
     Pitch_angle_command = pitch_cmd;
@@ -905,9 +936,9 @@ static void update_position_hold(float dt_sec) {
 }
 
 void set_position_hold_gains(float kp, float ki, float kd) {
-    Pos_kp_stick = clamp_gain(kp, 0.0f, 0.6f);
-    Pos_ki_stick = clamp_gain(ki, 0.0f, 0.2f);
-    Pos_kd_stick = clamp_gain(kd, 0.0f, 0.3f);
+    Pos_kp_stick = clamp_gain(kp, 0.0f, 100.0f);
+    Pos_ki_stick = clamp_gain(ki, 0.0f, 100.0f);
+    Pos_kd_stick = clamp_gain(kd, 0.0f, 100.0f);
 }
 
 void get_position_hold_gains(float& kp, float& ki, float& kd) {
