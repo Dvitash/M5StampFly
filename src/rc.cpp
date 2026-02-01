@@ -186,18 +186,32 @@ static void handle_one_camera_client_task(void *param) {
     // Pump bytes with frequent yields to allow main server to process requests
     uint8_t buf[1460];
     uint32_t lastYield = millis();
+    uint32_t lastFlush = millis();
     for (;;) {
         int n = client_in.read(buf, sizeof(buf));
         if (n > 0) {
-            if (client_out.write(buf, n) == 0) break;
+            size_t written = 0;
+            // Write in a loop to ensure all data is sent
+            while (written < (size_t)n) {
+                size_t w = client_out.write(buf + written, n - written);
+                if (w == 0) break;  // Connection closed
+                written += w;
+            }
+            if (written < (size_t)n) break;  // Failed to write all data
         } else {
             if (!client_in.connected() && !client_in.available()) break;
             vTaskDelay(1);
         }
         if (!client_out.connected()) break;
 
-        // yield every 10ms to allow main server to handle requests
-        if (millis() - lastYield > 10) {
+        // Flush output periodically to ensure data is sent promptly
+        if (millis() - lastFlush > 50) {
+            client_out.flush();
+            lastFlush = millis();
+        }
+
+        // yield every 20ms to allow main server to handle requests (less frequent for better streaming)
+        if (millis() - lastYield > 20) {
             vTaskDelay(1);
             lastYield = millis();
         }
@@ -797,7 +811,7 @@ void rc_init(void) {
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
 
     WiFi.mode(WIFI_AP_STA);
-    // WiFi.begin("UnitCamS3-WiFi", "");
+    WiFi.begin("UnitCamS3-WiFi", "");
     WiFi.softAPConfig(IPAddress(10, 0, 0, 1), IPAddress(10, 0, 0, 1), IPAddress(255, 255, 255, 0));
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
 
