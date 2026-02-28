@@ -340,24 +340,24 @@ void loop_400Hz(void) {
     uint32_t cs_time = micros();
 
     // front ToF
-    static uint16_t tof_debug_counter = 0;
-    tof_debug_counter++;
+    // static uint16_t tof_debug_counter = 0;
+    // tof_debug_counter++;
 
-    // print at 10 Hz
-    if (tof_debug_counter >= 40) {
-        tof_debug_counter = 0;
+    // // print at 10 Hz
+    // if (tof_debug_counter >= 40) {
+    //     tof_debug_counter = 0;
 
-        // serial_logger print
-        front_mm = tof_front_get_range();
-        // if (front_mm > 0) {
-        //     if (front_mm < FRONT_OBSTACLE_ENGAGE_MM) {
-        //         front_obstacle = true;
-        //     } else if (front_mm > FRONT_OBSTACLE_RELEASE_MM) {
-        //         front_obstacle = false;
-        //     }
-        // }
-        print("front=%d mm\n", front_mm);
-    }
+    //     // serial_logger print
+    //     front_mm = tof_front_get_range();
+    //     // if (front_mm > 0) {
+    //     //     if (front_mm < FRONT_OBSTACLE_ENGAGE_MM) {
+    //     //         front_obstacle = true;
+    //     //     } else if (front_mm > FRONT_OBSTACLE_RELEASE_MM) {
+    //     //         front_obstacle = false;
+    //     //     }
+    //     // }
+    //     print("front=%d mm\n", front_mm);
+    // }
 
     // led drive
     led_drive();

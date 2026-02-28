@@ -11,15 +11,18 @@
     --ok: #36c;
     --warn: #c63;
   }
+
   * {
     box-sizing: border-box;
   }
+
   body {
     margin: 0;
     font: 14px system-ui;
     background: var(--bg);
     color: var(--fg);
   }
+
   header {
     padding: 12px 16px;
     border-bottom: 1px solid #1f2a4d;
@@ -28,33 +31,39 @@
     align-items: center;
     flex-wrap: wrap;
   }
+
   header h1 {
     font: 600 16px system-ui;
     margin: 0;
   }
+
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 12px;
     padding: 12px;
   }
+
   .section-title {
     font: 600 14px system-ui;
     margin: 18px 12px 6px;
     opacity: 0.8;
     letter-spacing: 0.3px;
   }
+
   .card {
     background: var(--card);
     border: 1px solid #1f2a4d;
     border-radius: 10px;
     padding: 12px;
   }
+
   .row {
     display: flex;
     gap: 12px;
     flex-wrap: wrap;
   }
+
   button {
     background: #1e2b55;
     color: var(--fg);
@@ -63,32 +72,40 @@
     padding: 8px 12px;
     cursor: pointer;
   }
+
   button:hover {
     filter: brightness(1.1);
   }
+
   .kv {
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 6px 12px;
   }
+
   .ok {
     color: var(--ok);
   }
+
   .bad {
     color: var(--warn);
   }
+
   canvas {
     width: 100%;
     height: 220px;
     border-radius: 8px;
     background: #0d1328;
   }
+
   .num {
     font: 600 18px;
   }
+
   .axis {
     opacity: 0.85;
   }
+
   .kbd {
     background: #0d1328;
     border: 1px solid #23305a;
@@ -96,19 +113,23 @@
     padding: 2px 6px;
     margin-left: 6px;
   }
+
   .tiny {
     font-size: 12px;
     opacity: 0.9;
   }
+
   .card.disabled {
     opacity: 0.5;
     pointer-events: none;
   }
+
   label {
     display: inline-flex;
     align-items: center;
     gap: 6px;
   }
+
   input[type="number"] {
     width: 84px;
     background: #0d1328;
@@ -117,30 +138,47 @@
     border-radius: 6px;
     padding: 4px 6px;
   }
+
+  input[type="text"]#hostInput {
+    width: 120px;
+    background: #0d1328;
+    border: 1px solid #23305a;
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: inherit;
+  }
+
   .hint {
     opacity: 0.75;
   }
+
   .muted {
     opacity: 0.55;
   }
+
   #mapCard {
     position: relative;
     overflow: hidden;
   }
+
   #mapWrap {
     position: relative;
     width: 100%;
     height: 220px;
   }
+
   #mapWrap canvas {
     width: 100%;
     height: 100%;
   }
+
   #mapOverlay {
     position: absolute;
     inset: 0;
     pointer-events: none;
   }
+
   .click-ping {
     position: absolute;
     width: 18px;
@@ -152,6 +190,7 @@
     animation: clickPing 620ms ease-out forwards;
     box-shadow: 0 0 14px rgba(104, 160, 255, 0.4);
   }
+
   @keyframes clickPing {
     to {
       opacity: 0;
@@ -162,7 +201,7 @@
 </style>
 <header>
   <h1>Drone Telemetry</h1>
-  <div id="ip">IP:<span class="kbd" id="host"></span></div>
+  <label>IP: <input type="text" id="hostInput" placeholder="10.0.0.1" /></label>
   <div>RC link: <span id="rc" class="kbd">—</span></div>
   <div>t<sub>us</sub>: <span id="tus" class="kbd">0</span></div>
   <div class="row">
@@ -178,11 +217,11 @@
   <div class="card">
     <div class="row" style="justify-content: space-between; align-items: baseline">
       <h3 style="margin: 0">Action sequence</h3>
-      <div class="tiny hint">altitude target (m): <input type="number" id="seqAlt" value="0.5" step="0.1" min="0.2" max="1.8" /></div>
+      <div class="tiny hint">altitude target (m): <input type="number" id="seqAlt" value="0.5" step="0.1" min="0.2"
+          max="1.8" /></div>
     </div>
     <div class="row" style="align-items: center; gap: 8px">
-      <label
-        >action
+      <label>action
         <select id="seqType">
           <option value="forward">forward</option>
           <option value="backward">backward</option>
@@ -199,7 +238,9 @@
       <button onclick="clearSeq()">Clear</button>
     </div>
     <div class="tiny hint">sequence</div>
-    <div id="seqList" style="min-height: 64px; max-height: 260px; overflow-y: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px; display: grid; gap: 6px"></div>
+    <div id="seqList"
+      style="min-height: 64px; max-height: 260px; overflow-y: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px; display: grid; gap: 6px">
+    </div>
     <div class="row">
       <button onclick="sendSequence()">Send &amp; start</button>
       <button onclick="sequenceStop()">Stop</button>
@@ -248,9 +289,12 @@
     <div class="row tiny">
       <label><input type="checkbox" id="cameraEnabled" />enable camera stream</label>
     </div>
-    <div id="cameraContainer" style="position: relative; width: 100%; height: 220px; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; overflow: hidden">
+    <div id="cameraContainer"
+      style="position: relative; width: 100%; height: 220px; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; overflow: hidden">
       <img id="cameraStream" style="display: none; width: 100%; height: 100%; object-fit: contain" />
-      <div id="cameraPlaceholder" style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--fg); opacity: 0.7">Camera disabled</div>
+      <div id="cameraPlaceholder"
+        style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--fg); opacity: 0.7">
+        Camera disabled</div>
     </div>
   </div>
 </div>
@@ -311,7 +355,8 @@
       <label><input type="checkbox" id="mapReset" />reset on next reading</label>
       <button onclick="resetMap()" style="padding: 4px 8px; font-size: 12px">Reset Map</button>
     </div>
-    <div class="tiny hint">target: <span id="targetLabel">—</span> • prev: <span id="prevTargetLabel" class="muted">—</span></div>
+    <div class="tiny hint">target: <span id="targetLabel">—</span> • prev: <span id="prevTargetLabel"
+        class="muted">—</span></div>
     <div id="mapWrap">
       <canvas id="map"></canvas>
       <div id="mapOverlay"></div>
@@ -323,30 +368,41 @@
       <h3 style="margin: 0">Log</h3>
       <label style="font-size: 12px"><input type="checkbox" id="logEnabled" checked />enable polling</label>
     </div>
-    <input type="text" id="logSearch" placeholder="Search logs..." style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
-    <pre id="log" style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
+    <input type="text" id="logSearch" placeholder="Search logs..."
+      style="width: 100%; background: #0d1328; border: 1px solid #23305a; color: var(--fg); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px" />
+    <pre id="log"
+      style="height: 220px; overflow: auto; margin: 0; background: #0d1328; border: 1px solid #23305a; border-radius: 8px; padding: 8px"></pre>
   </div>
 </div>
 
 <script>
   // http helpers
-  const host = location.host || "10.0.0.1";
-  document.getElementById("host").textContent = host || "(set)";
+  let host = localStorage.getItem("droneHost") || location.host || "10.0.0.1";
+  const hostInput = document.getElementById("hostInput");
+  hostInput.value = host;
+  hostInput.addEventListener("change", () => {
+    const v = hostInput.value.trim();
+    if (v) {
+      host = v.replace(/^https?:\/\//, "").split("/")[0];
+      hostInput.value = host;
+      localStorage.setItem("droneHost", host);
+    }
+  });
   const http = (p, opt = {}) => fetch(`http://${host}${p}`, opt);
 
   // control endpoints
   function hover() {
-    http(`/hover?altitude=0.5`).catch(() => {});
+    http(`/hover?altitude=0.5`).catch(() => { });
   }
   function land() {
-    http(`/land`).catch(() => {});
+    http(`/land`).catch(() => { });
   }
   function buzz(freq) {
     if (freq > 0) http(`/buzz/start?freq=${freq}`);
     else http(`/buzz/stop?freq=880`);
   }
   function nudge(direction, speed = 0.6) {
-    http(`/move?direction=${direction}&speed=${speed}`).catch(() => {});
+    http(`/move?direction=${direction}&speed=${speed}`).catch(() => { });
   }
   function sendStick(ail, ele, rud, thr) {
     http(`/stick`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ail, ele, rud, thr }) });
@@ -548,7 +604,7 @@
     currentTarget = null;
     previousTarget = null;
     updateTargetLabels();
-    http(`/reset/position`).catch(() => {});
+    http(`/reset/position`).catch(() => { });
     drawMap();
   }
 

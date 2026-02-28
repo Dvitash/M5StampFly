@@ -25,6 +25,8 @@
 
 #include "rc.hpp"
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WebServer.h>
@@ -33,6 +35,13 @@
 #include "imu.hpp"
 #include "serial_logger.hpp"
 #include <cmath>
+
+#define SUPABASE_PROJECT_ID "ezdenxjlzxtpdjzebfjo"
+#define SUPABASE_ANON_KEY                                                                                              \
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."                                                                            \
+    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV6ZGVueGpsenh0cGRqemViZmpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4ODkyMzYsImV4cCI6" \
+    "MjA4NTQ2NTIzNn0.Sp7Ib3ysZS4vm1XfZ-Yr4-_odwPK2U91I1MOiXeZV18"
+#define SUPABASE_PUBLISHABLE_KEY "sb_publishable_TtEga7NJ4QtXjAI4qQAhhw_2DihyA2T"
 
 extern volatile float acc_x, acc_y, acc_z;
 extern volatile float gyro_x, gyro_y, gyro_z;
@@ -50,6 +59,118 @@ static void webserver_task(void *param) {
         server.handleClient();
         // small delay to yield but keep responsiveness high
         vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+// org_id from drone_org_registry_map, -1 = not yet fetched
+static int8_t g_org_id = -1;
+
+static void supabase_registry_task(void *param) {
+    char url_buf[180];
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (WiFi.status() != WL_CONNECTED) continue;
+
+        // fetch org_id from drone_org_registry_map if not yet known
+        if (g_org_id < 0) {
+            // colons are reserved - use in.(%%22...%%22) which properly handles quoted values
+            snprintf(url_buf, sizeof(url_buf),
+                     "https://" SUPABASE_PROJECT_ID
+                     ".supabase.co/rest/v1/"
+                     "drone_org_registry_map?select=org_id&hardware_id=in.(%%22%02X%%3A%02X%%3A%02X%%3A%02X%%3A%02X%%"
+                     "3A%02X%%22)",
+                     MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+
+            WiFiClientSecure client;
+            client.setInsecure();
+            HTTPClient http;
+            http.begin(client, url_buf);
+            http.addHeader("apikey", SUPABASE_ANON_KEY);
+            http.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
+            http.addHeader("Accept", "application/json");
+            http.setTimeout(5000);
+            int code    = http.GET();
+            String body = http.getString();
+            http.end();
+
+            if (code != 200 && body.length() > 0) {
+                serial_logger_usb_print("drone_org_registry_map body: ");
+                serial_logger_usb_println(body.c_str());
+            }
+            if (code != 200) {
+                serial_logger_usb_print("drone_org_registry_map url: ");
+                serial_logger_usb_println(url_buf);
+            }
+
+            if (code == 200 && body.length() > 0) {
+                // parse [{"org_id":N}] - find "org_id": and read number
+                int idx = body.indexOf("\"org_id\":");
+                if (idx >= 0) {
+                    idx += 9;  // skip "org_id":
+                    int end = body.indexOf(',', idx);
+                    if (end < 0) end = body.indexOf('}', idx);
+                    if (end > idx) {
+                        g_org_id = (int8_t)body.substring(idx, end).toInt();
+                        serial_logger_usb_print("org_id: ");
+                        serial_logger_usb_println(String(g_org_id).c_str());
+                    }
+                }
+                if (g_org_id < 0) {
+                    serial_logger_usb_print("drone_org_registry_map: no match. querying MAC ");
+                    char mac_dbg[18];
+                    snprintf(mac_dbg, sizeof(mac_dbg), "%02X:%02X:%02X:%02X:%02X:%02X", MyMacAddr[0], MyMacAddr[1],
+                             MyMacAddr[2], MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+                    serial_logger_usb_print(mac_dbg);
+                    serial_logger_usb_println(" - add this to drone_org_registry_map");
+                }
+            } else {
+                serial_logger_usb_print("drone_org_registry_map: ");
+                serial_logger_usb_println(String(code).c_str());
+            }
+            continue;
+        }
+
+        // poll sweep_now every 2s
+        vTaskDelay(pdMS_TO_TICKS(1000));  // extra 1s to total 2s between polls
+        if (WiFi.status() != WL_CONNECTED) continue;
+
+        snprintf(url_buf, sizeof(url_buf),
+                 "https://" SUPABASE_PROJECT_ID ".supabase.co/rest/v1/sweep_now?select=sweep_now&org_id=eq.%d",
+                 (int)g_org_id);
+
+        WiFiClientSecure client;
+        client.setInsecure();
+        HTTPClient http;
+        http.begin(client, url_buf);
+        http.addHeader("apikey", SUPABASE_ANON_KEY);
+        http.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
+        http.addHeader("Accept", "application/json");
+        http.setTimeout(5000);
+        int code    = http.GET();
+        String body = http.getString();
+        http.end();
+
+        if (code == 200 && body.length() > 0) {
+            int idx = body.indexOf("\"sweep_now\":");
+            if (idx >= 0) {
+                idx += 12;
+                int end = body.indexOf(',', idx);
+                if (end < 0) end = body.indexOf('}', idx);
+                bool sweep = end > idx && body.substring(idx, end).indexOf("true") >= 0;
+                serial_logger_usb_print("sweep_now: ");
+                serial_logger_usb_println(sweep ? "true" : "false");
+            }
+        } else {
+            serial_logger_usb_print("sweep_now poll: ");
+            serial_logger_usb_print(String(code).c_str());
+            if (body.length() > 0) {
+                serial_logger_usb_print(" ");
+                serial_logger_usb_println(body.c_str());
+            } else {
+                serial_logger_usb_println(http.errorToString(code).c_str());
+            }
+        }
     }
 }
 
@@ -797,13 +918,12 @@ void rc_init(void) {
     for (uint8_t i = 0; i < 16; i++) Stick[i] = 0.0;
 
     WiFi.mode(WIFI_AP_STA);
-    // WiFi.begin("UnitCamS3-WiFi", "");
+    WiFi.begin("QU-Device", "1234567!");
+
     WiFi.softAPConfig(IPAddress(10, 0, 0, 1), IPAddress(10, 0, 0, 1), IPAddress(255, 255, 255, 0));
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
 
     serial_logger_usb_println("Access Point started!");
-    serial_logger_usb_print("AP IP: ");
-    serial_logger_usb_println(WiFi.softAPIP().toString());
 
     WiFi.macAddress((uint8_t *)MyMacAddr);
     print("MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X\r\n", MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3],
@@ -837,12 +957,22 @@ void rc_init(void) {
 
     // sync channel with joined AP if available
     if (wait_for_sta_ip(8000)) {
+        serial_logger_usb_print("STA IP: ");
+        serial_logger_usb_println(WiFi.localIP().toString());
+        serial_logger_usb_print("Gateway: ");
+        serial_logger_usb_println(WiFi.gatewayIP().toString());
+        serial_logger_usb_print("Subnet: ");
+        serial_logger_usb_println(WiFi.subnetMask().toString());
+        serial_logger_usb_print("DNS: ");
+        serial_logger_usb_println(WiFi.dnsIP().toString());
         wifi_ap_record_t apinfo{};
         if (esp_wifi_sta_get_ap_info(&apinfo) == ESP_OK) {
             esp_wifi_set_channel(apinfo.primary, WIFI_SECOND_CHAN_NONE);
             serial_logger_usb_print("Synced WiFi channel to ");
             serial_logger_usb_println(String(apinfo.primary));
         }
+    } else {
+        serial_logger_usb_println("STA: no IP (not connected to QU-Device)");
     }
 
     serial_logger_init();
@@ -891,6 +1021,8 @@ void rc_init(void) {
     // start webserver in separate task so it doesn't block control loop
     xTaskCreatePinnedToCore(webserver_task, "webserver", 8192, nullptr, 1, nullptr, 1);
 
+    xTaskCreatePinnedToCore(supabase_registry_task, "supabase_registry", 8192, nullptr, 0, nullptr, 1);
+
     // // start the separate camera server on port 81 so webserver never blocks
     start_camera_stream_server();
 }
@@ -936,6 +1068,10 @@ uint8_t telemetry_send(uint8_t *data, uint16_t datalen) {
 
 void rc_end(void) {
     // Ps3.end();
+}
+
+int8_t rc_get_org_id(void) {
+    return g_org_id;
 }
 
 uint8_t rc_isconnected(void) {

@@ -83,6 +83,9 @@ void sequence_stop(void);
 extern volatile float Stick[16];
 extern volatile uint8_t Rc_err_flag;
 extern volatile uint8_t MyMacAddr[6];
+
+// org_id from Supabase drone_org_registry_map (-1 = not yet fetched)
+int8_t rc_get_org_id(void);
 extern volatile uint8_t Recv_MAC[3];
 extern volatile uint16_t Connect_flag;
 #endif
