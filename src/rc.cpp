@@ -178,6 +178,29 @@ static WiFiServer cameraServer(81);
 
 static void camera_stream_task(void *param);
 
+// Upstream camera (the device that actually produces MJPEG).
+// Defaults to the common ESP32-CAM softAP IP, but can be changed at runtime via HTTP.
+static IPAddress g_camera_upstream_ip(192, 168, 4, 1);
+static uint16_t g_camera_upstream_port = 80;
+static String g_camera_upstream_path   = "/api/v1/stream";
+
+static bool parse_ip_or_host(const String &s, IPAddress &out) {
+    // Accept dotted-quad IP or hostname (resolved via DNS)
+    if (out.fromString(s)) return true;
+    IPAddress resolved;
+    if (WiFi.hostByName(s.c_str(), resolved)) {
+        out = resolved;
+        return true;
+    }
+    return false;
+}
+
+static void send_json(const String &json) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.send(200, "application/json", json);
+}
+
 void start_camera_stream_server() {
     // start listening on port 81
     cameraServer.begin();
@@ -236,6 +259,66 @@ static void handle_one_camera_client_task(void *param) {
         if (q >= 0) qs = path.substring(q);
     }
 
+    // Allow overriding upstream per-request: /stream?up=1.2.3.4&port=80&path=/api/v1/stream
+    // We strip these params from the forwarded query string so the camera endpoint doesn't see them.
+    IPAddress upstream_ip = g_camera_upstream_ip;
+    uint16_t upstream_port = g_camera_upstream_port;
+    String upstream_path = g_camera_upstream_path;
+    if (qs.length() > 1 && qs[0] == '?') {
+        // very small/fast query parser
+        auto getParam = [&](const char *key) -> String {
+            String k = String(key) + "=";
+            int i = qs.indexOf(k);
+            if (i < 0) return String();
+            int v0 = i + k.length();
+            int v1 = qs.indexOf('&', v0);
+            if (v1 < 0) v1 = qs.length();
+            String v = qs.substring(v0, v1);
+            v.replace("%2F", "/");
+            v.replace("%3A", ":");
+            return v;
+        };
+        String up = getParam("up");
+        if (up.length() > 0) {
+            IPAddress tmp;
+            if (parse_ip_or_host(up, tmp)) upstream_ip = tmp;
+        }
+        String portS = getParam("port");
+        if (portS.length() > 0) {
+            int p = portS.toInt();
+            if (p > 0 && p < 65536) upstream_port = (uint16_t)p;
+        }
+        String pathS = getParam("path");
+        if (pathS.length() > 0) upstream_path = pathS;
+
+        // Remove our control params from forwarded qs (best-effort; ok if we leave it)
+        // This keeps the upstream camera API clean if it doesn't expect these params.
+        // We keep any other params (e.g., resolution settings) intact.
+        auto stripParam = [&](const char *key) {
+            String k1 = String("?") + key + "=";
+            String k2 = String("&") + key + "=";
+            int i = qs.indexOf(k1);
+            if (i < 0) i = qs.indexOf(k2);
+            if (i < 0) return;
+            int amp = qs.indexOf('&', i + 1);
+            if (amp < 0) {
+                // truncate to before this param
+                qs = qs.substring(0, i);
+            } else {
+                qs = qs.substring(0, i) + qs.substring(amp);
+                // if we removed the first param after '?', we may now have '?&' -> '?'
+                qs.replace("?&", "?");
+            }
+            // if only '?' remains, drop it
+            if (qs == "?") qs = "";
+        };
+        stripParam("up");
+        stripParam("port");
+        stripParam("path");
+        // clean trailing '?' (if any)
+        if (qs.endsWith("?")) qs = qs.substring(0, qs.length() - 1);
+    }
+
     // reduce timeout to avoid blocking main server - check quickly and fail fast
     if (!wait_for_sta_ip(500)) {
         client_out.print(
@@ -248,7 +331,7 @@ static void handle_one_camera_client_task(void *param) {
 
     WiFiClient client_in;
     client_in.setTimeout(2000);
-    if (!client_in.connect(IPAddress(192, 168, 4, 1), 80)) {
+    if (!client_in.connect(upstream_ip, upstream_port)) {
         client_out.print(
             "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nupstream connect failed");
         client_out.stop();
@@ -256,13 +339,15 @@ static void handle_one_camera_client_task(void *param) {
         return;
     }
 
-    String upstream = "/api/v1/stream";
+    String upstream = upstream_path;
     upstream += qs;
 
     client_in.print("GET ");
     client_in.print(upstream);
     client_in.print(" HTTP/1.1\r\n");
-    client_in.print("Host: 192.168.4.1\r\n");
+    client_in.print("Host: ");
+    client_in.print(upstream_ip.toString());
+    client_in.print("\r\n");
     client_in.print("Accept: multipart/x-mixed-replace,image/*,*/*;q=0.8\r\n");
     client_in.print("Connection: close\r\n\r\n");
 
@@ -1011,10 +1096,72 @@ void rc_init(void) {
 
     server.on("/camera/stream", HTTP_GET, []() {
         server.sendHeader("Access-Control-Allow-Origin", "*");
-        String loc = "http://" + WiFi.softAPIP().toString() + ":81/stream";
+        // Prefer the STA/LAN IP (QU-Device network) so you can view the stream without joining the drone AP.
+        // Fallback to softAP IP when STA isn't connected.
+        IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : IPAddress(0, 0, 0, 0);
+        if (ip == IPAddress(0, 0, 0, 0)) ip = WiFi.softAPIP();
+        String loc = "http://" + ip.toString() + ":81/stream";
+
+        // Preserve query string so callers can pass overrides like ?up=<camera_ip>
+        if (server.args() > 0) {
+            loc += "?";
+            for (uint8_t i = 0; i < server.args(); i++) {
+                if (i) loc += "&";
+                loc += server.argName(i);
+                loc += "=";
+                loc += server.arg(i);
+            }
+        }
         server.sendHeader("Location", loc);
         server.send(302);
     });
+
+    // Configure upstream camera (where the drone proxies MJPEG from)
+    server.on("/camera/upstream", HTTP_GET, []() {
+        String j = "{";
+        j += "\"ip\":\"" + g_camera_upstream_ip.toString() + "\",";
+        j += "\"port\":" + String((int)g_camera_upstream_port) + ",";
+        j += "\"path\":\"" + g_camera_upstream_path + "\"";
+        j += "}";
+        send_json(j);
+    });
+    server.on("/camera/upstream", HTTP_POST, []() {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        String ipS = server.hasArg("ip") ? server.arg("ip") : "";
+        String portS = server.hasArg("port") ? server.arg("port") : "";
+        String pathS = server.hasArg("path") ? server.arg("path") : "";
+
+        if (ipS.length() > 0) {
+            IPAddress tmp;
+            if (parse_ip_or_host(ipS, tmp)) {
+                g_camera_upstream_ip = tmp;
+            } else {
+                server.send(400, "text/plain", "bad ip/host");
+                return;
+            }
+        }
+        if (portS.length() > 0) {
+            int p = portS.toInt();
+            if (p <= 0 || p >= 65536) {
+                server.send(400, "text/plain", "bad port");
+                return;
+            }
+            g_camera_upstream_port = (uint16_t)p;
+        }
+        if (pathS.length() > 0) {
+            if (!pathS.startsWith("/")) pathS = "/" + pathS;
+            g_camera_upstream_path = pathS;
+        }
+
+        String j = "{";
+        j += "\"ok\":true,";
+        j += "\"ip\":\"" + g_camera_upstream_ip.toString() + "\",";
+        j += "\"port\":" + String((int)g_camera_upstream_port) + ",";
+        j += "\"path\":\"" + g_camera_upstream_path + "\"";
+        j += "}";
+        send_json(j);
+    });
+    server.on("/camera/upstream", HTTP_OPTIONS, handle_options);
 
     server.begin();
 
