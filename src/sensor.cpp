@@ -69,7 +69,7 @@ volatile float Vel_y           = 0.0f;
 volatile float Az              = 0.0;
 volatile float Az_bias         = 0.0;
 int16_t deltaX, deltaY;
-PMW3901 flow;
+// PMW3901 flow;
 
 volatile uint16_t Offset_counter = 0;
 
@@ -147,11 +147,11 @@ void sensor_init() {
 
     delay(50);
 
-    if (!flow.begin()) {
-        print("PMW3901 initialization failed\r\n");
-        while (1);
-    }
-    print("PMW3901 initialized successfully\r\n");
+    // if (!flow.begin()) {
+    //     print("PMW3901 initialization failed\r\n");
+    //     while (1);
+    // }
+    // print("PMW3901 initialized successfully\r\n");
     Drone_ahrs.begin(400.0);
     ina3221.begin(&Wire1);
     ina3221.reset();
@@ -284,41 +284,41 @@ float sensor_read(void) {
         Pitch_angle = Drone_ahrs.getRoll() * (float)DEG_TO_RAD;
         Yaw_angle   = -Drone_ahrs.getYaw() * (float)DEG_TO_RAD;
 
-        bool gotMotion = false;
-        flow.readMotion(deltaX, deltaY, gotMotion);
+        // bool gotMotion = false;
+        // flow.readMotion(deltaX, deltaY, gotMotion);
 
-        if (gotMotion && Altitude2 > 0.1f) {
-            float meters_per_pixel = POS_PIXEL_SCALE * ((Altitude2 > 0.05f) ? Altitude2 : POS_SCALE_BASE_ALTITUDE);
+        // if (gotMotion && Altitude2 > 0.1f) {
+        //     float meters_per_pixel = POS_PIXEL_SCALE * ((Altitude2 > 0.05f) ? Altitude2 : POS_SCALE_BASE_ALTITUDE);
 
-            float body_dx_m = static_cast<float>(deltaX) * meters_per_pixel;
-            float body_dy_m = static_cast<float>(deltaY) * meters_per_pixel;
+        //     float body_dx_m = static_cast<float>(deltaX) * meters_per_pixel;
+        //     float body_dy_m = static_cast<float>(deltaY) * meters_per_pixel;
 
-            float yaw = Yaw_angle + PI;
-            if (yaw > PI) yaw -= 2.0f * PI;
-            if (yaw < -PI) yaw += 2.0f * PI;
+        //     float yaw = Yaw_angle + PI;
+        //     if (yaw > PI) yaw -= 2.0f * PI;
+        //     if (yaw < -PI) yaw += 2.0f * PI;
 
-            float cos_yaw = cosf(yaw);
-            float sin_yaw = sinf(yaw);
+        //     float cos_yaw = cosf(yaw);
+        //     float sin_yaw = sinf(yaw);
 
-            float world_dx = cos_yaw * body_dx_m - sin_yaw * body_dy_m;
-            float world_dy = sin_yaw * body_dx_m + cos_yaw * body_dy_m;
+        //     float world_dx = cos_yaw * body_dx_m - sin_yaw * body_dy_m;
+        //     float world_dy = sin_yaw * body_dx_m + cos_yaw * body_dy_m;
 
-            float dt = opt_interval;
-            if (dt < 1.0e-4f) dt = sens_interval;
-            opt_interval = 0.0f;
+        //     float dt = opt_interval;
+        //     if (dt < 1.0e-4f) dt = sens_interval;
+        //     opt_interval = 0.0f;
 
-            current_x += world_dx;
-            current_y += world_dy;
+        //     current_x += world_dx;
+        //     current_y += world_dy;
 
-            float raw_vel_x = world_dx / dt;
-            float raw_vel_y = world_dy / dt;
-            Vel_x           = vel_x_filter.update(raw_vel_x, dt);
-            Vel_y           = vel_y_filter.update(raw_vel_y, dt);
-        } else {
-            Vel_x        = vel_x_filter.update(0.0f, sens_interval);
-            Vel_y        = vel_y_filter.update(0.0f, sens_interval);
-            opt_interval = 0.0f;
-        }
+        //     float raw_vel_x = world_dx / dt;
+        //     float raw_vel_y = world_dy / dt;
+        //     Vel_x           = vel_x_filter.update(raw_vel_x, dt);
+        //     Vel_y           = vel_y_filter.update(raw_vel_y, dt);
+        // } else {
+        //     Vel_x        = vel_x_filter.update(0.0f, sens_interval);
+        //     Vel_y        = vel_y_filter.update(0.0f, sens_interval);
+        //     opt_interval = 0.0f;
+        // }
 
         // for debug
         // USBSerial.printf("%6.3f %7.4f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f\n\r",
