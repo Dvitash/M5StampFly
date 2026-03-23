@@ -1364,17 +1364,24 @@
   function startCameraStream() {
     cameraImg.onload = () => {
       cameraStatus.textContent = "streaming";
+      cameraStatus.className = "tiny hint ok";
       cameraImg.style.display = "block";
       cameraPlaceholder.style.display = "none";
     };
     cameraImg.onerror = () => {
       cameraStatus.textContent = "error";
+      cameraStatus.className = "tiny hint bad";
       cameraImg.style.display = "none";
       cameraPlaceholder.style.display = "block";
+      cameraPlaceholder.textContent = "Camera error (check upstream / network)";
     };
-    // one request only, no timers
-    cameraImg.src = `http://${host}/camera/stream`;
+    // one request only (MJPEG keeps the connection open)
+    // Pass through optional upstream override if provided by the user.
+    const up = (el("cameraUpstream")?.value || "").trim();
+    const upQs = up ? `?up=${encodeURIComponent(up)}` : "";
+    cameraImg.src = `http://${host}/camera/stream${upQs}`;
     cameraStatus.textContent = "connecting...";
+    cameraStatus.className = "tiny hint";
   }
 
   function stopCameraStream() {
@@ -1389,4 +1396,47 @@
     if (cameraEnabled.checked) startCameraStream();
     else stopCameraStream();
   });
+</script>
+
+<script>
+  // Camera upstream (optional):
+  // If your camera producer is not at 192.168.4.1, you can enter its IP here (on the QU-Device LAN).
+  // This is passed as ?up=<ip> to the drone proxy.
+  (function injectCameraUpstreamUI() {
+    const cameraCard = document.querySelector("h3")?.closest(".card");
+    // Safer: locate by id inside the camera block
+    const camBox = document.getElementById("cameraContainer")?.parentElement;
+    if (!camBox) return;
+    const row = document.createElement("div");
+    row.className = "row tiny";
+    row.style.marginTop = "6px";
+    row.innerHTML = `
+      <label>camera upstream IP (optional):
+        <input type="text" id="cameraUpstream" placeholder="e.g. 10.135.58.123" style="width: 170px; background:#0d1328; border:1px solid #23305a; color:var(--fg); border-radius:6px; padding:4px 8px;" />
+      </label>
+      <button id="cameraUpstreamApply" style="padding:4px 8px; font-size:12px;">Apply</button>
+    `;
+    camBox.insertBefore(row, document.getElementById("cameraContainer"));
+
+    const upInput = document.getElementById("cameraUpstream");
+    const saved = localStorage.getItem("cameraUpstream") || "";
+    if (saved) upInput.value = saved;
+
+    document.getElementById("cameraUpstreamApply").addEventListener("click", async () => {
+      const up = upInput.value.trim();
+      localStorage.setItem("cameraUpstream", up);
+      // Also set it on the drone (optional), so other clients inherit it.
+      if (up) {
+        try {
+          const body = new URLSearchParams();
+          body.set("ip", up);
+          await http(`/camera/upstream`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString() });
+          log(`camera upstream set -> ${up}`);
+        } catch (e) {
+          log("camera upstream set failed");
+        }
+      }
+      if (cameraEnabled.checked) startCameraStream();
+    });
+  })();
 </script>
