@@ -511,7 +511,9 @@ void control_init(void) {
 ///////////////////////////////////////////////////////////////////
 
 float get_trim_duty(float voltage) {
-    return -0.2448f * voltage + 1.5892f;
+    // Original (716 motors, 24mm props): -0.2448 * V + 1.5892
+    // Scaled 1.05x for 720 motors + 31mm props + 30% payload increase
+    return (-0.2448f * voltage + 1.5892f) * 1.35f;
 }
 
 float get_rate_ref(float x) {
