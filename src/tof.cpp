@@ -151,7 +151,7 @@ int16_t tof_range_get(VL53LX_DEV dev) {
         if (count != 0) range_ave = range_ave / count;
     }
     VL53LX_ClearInterruptAndStartMeasurement(dev);
-    return range_max;
+    return range_ave;
 }
 
 void tof_test_ranging(VL53LX_DEV dev) {

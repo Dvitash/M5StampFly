@@ -836,12 +836,20 @@ static void update_position_hold(float dt_sec) {
     static float last_x   = 0.0f;
     static float last_y   = 0.0f;
     static float steady_t = 0.0f;
+    static float prev_roll_cmd  = 0.0f;
+    static float prev_pitch_cmd = 0.0f;
 
-    if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0) {
+    if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0 || Position_estimate_valid == 0) {
+        if (PositionHold_flag != 0 && Position_estimate_valid == 0) {
+            PositionHold_flag = 0;
+        }
         pos_i_x = 0.0f;
         pos_i_y = 0.0f;
         last_x  = current_x;
         last_y  = current_y;
+        steady_t = 0.0f;
+        prev_roll_cmd = 0.0f;
+        prev_pitch_cmd = 0.0f;
         return;
     }
 
@@ -922,8 +930,6 @@ static void update_position_hold(float dt_sec) {
     roll_cmd  = clampf(roll_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
     pitch_cmd = clampf(pitch_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
 
-    static float prev_roll_cmd  = 0.0f;
-    static float prev_pitch_cmd = 0.0f;
     float max_delta             = 0.02f;
     float roll_step             = clampf(roll_cmd - prev_roll_cmd, -max_delta, max_delta);
     float pitch_step            = clampf(pitch_cmd - prev_pitch_cmd, -max_delta, max_delta);

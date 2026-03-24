@@ -66,6 +66,7 @@ volatile float Altitude2       = 0.0f;
 volatile float Alt_velocity    = 0.0f;
 volatile float Vel_x           = 0.0f;
 volatile float Vel_y           = 0.0f;
+volatile uint8_t Position_estimate_valid = 0;
 volatile float Az              = 0.0;
 volatile float Az_bias         = 0.0;
 int16_t deltaX, deltaY;
@@ -264,6 +265,7 @@ float sensor_read(void) {
         vel_y_filter.reset();
         Vel_x = 0.0f;
         Vel_y = 0.0f;
+        Position_estimate_valid = 0;
 
         acc_filter.reset();
     }

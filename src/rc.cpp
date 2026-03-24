@@ -31,6 +31,7 @@
 #include <esp_wifi.h>
 #include <WebServer.h>
 #include "flight_control.hpp"
+#include "sensor.hpp"
 #include <buzzer.h>
 #include "imu.hpp"
 #include "serial_logger.hpp"
@@ -452,6 +453,9 @@ volatile uint8_t MyMacAddr[6];
 volatile uint8_t peer_command[4] = {0xaa, 0x55, 0x16, 0x88};
 volatile uint8_t Rc_err_flag     = 0;
 esp_now_peer_info_t peerInfo;
+static constexpr int RC_PACKET_SIZE = 25;
+static constexpr uint8_t RC_BAD_PACKET_LIMIT = 3;
+static volatile uint8_t g_bad_packet_count = 0;
 
 // RC
 volatile float Stick[16];
@@ -459,13 +463,34 @@ volatile uint8_t Recv_MAC[3];
 
 void on_esp_now_sent(const uint8_t *mac_addr, esp_now_send_status_t status);
 
+static void apply_bad_packet_failsafe() {
+    Rc_err_flag = 1;
+    Connect_flag = 40;
+    PositionHold_flag = 0;
+
+    Stick[RUDDER] = 0.0f;
+    Stick[THROTTLE] = 0.0f;
+    Stick[AILERON] = 0.0f;
+    Stick[ELEVATOR] = 0.0f;
+    Stick[BUTTON_ARM] = 0.0f;
+    Stick[BUTTON_FLIP] = 0.0f;
+    Stick[CONTROLMODE] = ANGLECONTROL;
+    Stick[ALTCONTROLMODE] = AUTO_ALT;
+
+    ahrs_reset_flag = 0;
+}
+
 // 受信コールバック
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *recv_data, int data_len) {
-    Connect_flag = 0;
-
     uint8_t *d_int;
     // int16_t d_short;
     float d_float;
+
+    if (data_len != RC_PACKET_SIZE) {
+        if (g_bad_packet_count < RC_BAD_PACKET_LIMIT) g_bad_packet_count++;
+        if (g_bad_packet_count >= RC_BAD_PACKET_LIMIT) apply_bad_packet_failsafe();
+        return;
+    }
 
     if (!TelemAddr[0] && !TelemAddr[1] && !TelemAddr[2] && !TelemAddr[3] && !TelemAddr[4] && !TelemAddr[5]) {
         memcpy(TelemAddr, mac_addr, 6);
@@ -487,7 +512,9 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *recv_data, int data_len)
     if ((recv_data[0] == MyMacAddr[3]) && (recv_data[1] == MyMacAddr[4]) && (recv_data[2] == MyMacAddr[5])) {
         Rc_err_flag = 0;
     } else {
-        Rc_err_flag = 1;
+        if (g_bad_packet_count < RC_BAD_PACKET_LIMIT) g_bad_packet_count++;
+        if (g_bad_packet_count >= RC_BAD_PACKET_LIMIT) apply_bad_packet_failsafe();
+        else Rc_err_flag = 1;
         return;
     }
 
@@ -496,9 +523,15 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *recv_data, int data_len)
     for (uint8_t i = 0; i < 24; i++) check_sum = check_sum + recv_data[i];
     // if (check_sum!=recv_data[23])USBSerial.printf("checksum=%03d recv_sum=%03d\n\r", check_sum, recv_data[23]);
     if (check_sum != recv_data[24]) {
-        Rc_err_flag = 1;
+        if (g_bad_packet_count < RC_BAD_PACKET_LIMIT) g_bad_packet_count++;
+        if (g_bad_packet_count >= RC_BAD_PACKET_LIMIT) apply_bad_packet_failsafe();
+        else Rc_err_flag = 1;
         return;
     }
+
+    g_bad_packet_count = 0;
+    Rc_err_flag = 0;
+    Connect_flag = 0;
 
     d_int         = (uint8_t *)&d_float;
     d_int[0]      = recv_data[3];
@@ -604,6 +637,11 @@ void handle_movement() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     const String dir = server.arg("direction");
 
+    if (Position_estimate_valid == 0) {
+        server.send(409, "text/plain", "position estimate unavailable");
+        return;
+    }
+
     // step size in meters; we default to 0.5 m and clamp if a 'step' arg is provided
     float step = server.hasArg("step") ? server.arg("step").toFloat() : 0.5f;
     if (step <= 0.0f) step = 0.5f;
@@ -701,6 +739,11 @@ static void handle_target_set() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     if (!server.hasArg("x") || !server.hasArg("y")) {
         server.send(400, "text/plain", "missing x or y");
+        return;
+    }
+
+    if (Position_estimate_valid == 0) {
+        server.send(409, "text/plain", "position estimate unavailable");
         return;
     }
 

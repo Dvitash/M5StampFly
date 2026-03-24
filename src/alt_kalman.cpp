@@ -103,12 +103,39 @@ void Alt_kalman::set_vel(float v) {
 }
 
 void Alt_kalman::reset(void) {
+    accel = 0.0f;
+    z_sens = 0.0f;
+    true_v = 0.0f;
+    k1 = 0.0f;
+    k2 = 0.0f;
+    k3 = 0.0f;
+
+    velocity = 0.0f;
+    altitude = 0.0f;
+    bias = 0.0f;
+
+    velocity_ = 0.0f;
+    altitude_ = 0.0f;
+    bias_ = 0.0f;
+
     // P
     p11 = 100.0, p12 = 0.0, p13 = 0.0;
     p21 = 0.0, p22 = 100.0, p23 = 0.0;
     p31 = 0.0, p32 = 0.0, p33 = 100.0;
 
-    Velocity = 0.0, Altitude = 0.0, Bias = 0.0;
+    p11_ = 0.0f;
+    p12_ = 0.0f;
+    p13_ = 0.0f;
+    p21_ = 0.0f;
+    p22_ = 0.0f;
+    p23_ = 0.0f;
+    p31_ = 0.0f;
+    p32_ = 0.0f;
+    p33_ = 0.0f;
+
+    Velocity = 0.0f;
+    Altitude = 0.0f;
+    Bias = 0.0f;
 }
 
 void mat_times(Mat A, Mat B) {
