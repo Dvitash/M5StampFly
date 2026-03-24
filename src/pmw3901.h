@@ -46,8 +46,8 @@ class PMW3901 {
         deltaX = burst.dx;
         deltaY = burst.dy;
 
-        // Datasheet: motion register == 0xB0 when new data valid
-        gotMotion = (burst.motion == 0xB0);
+        // Check motion bit (bit 7); exact 0xB0 was too strict and misses 0x80, 0x88, etc.
+        gotMotion = (burst.motion & 0x80) != 0;
     }
 
     void readMotion(int16_t &deltaX, int16_t &deltaY, bool &gotMotion, uint8_t &squal) {
@@ -58,8 +58,7 @@ class PMW3901 {
         deltaY = burst.dy;
         squal = burst.squal;
 
-        // Datasheet: motion register == 0xB0 when new data valid
-        gotMotion = (burst.motion == 0xB0);
+        gotMotion = (burst.motion & 0x80) != 0;
     }
 
     void readMotion(int16_t &dx, int16_t &dy) {

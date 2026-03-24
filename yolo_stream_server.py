@@ -4,9 +4,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 import os
 import time
+import uuid
 import threading
 
 import cv2
@@ -28,11 +28,12 @@ if not CAM_URL:
     # - If DRONE_HOST is unset, we default to the old "drone AP" IP.
     host = DRONE_HOST or "10.0.0.1"
     CAM_URL = f"http://192.168.4.1/api/v1/stream"
+
 TARGET_FPS = 3.0
 MIN_INTERVAL = 1.0 / TARGET_FPS
 
-ANNOUNCE_COOLDOWN = 3.0     # voice cooldown
-DB_ALERT_COOLDOWN = 1.0     # supabase insert cooldown to avoid spam
+ANNOUNCE_COOLDOWN = 3.0       # voice cooldown
+DB_ALERT_COOLDOWN = 1.0       # supabase insert cooldown to avoid spam
 
 MAX_BUFFER_SIZE = 500 * 1024
 CHUNK_SIZE = 8192
@@ -43,6 +44,14 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 DEFAULT_ORG_ID_STR = os.getenv("DEFAULT_ORG_ID", "").strip()
 
+# Storage settings
+DETECTION_IMAGE_BUCKET = "photos"
+ACTIVITY_FEED_TABLE = os.getenv("ACTIVITY_FEED_TABLE", "activity_feed").strip()
+
+# These should match your DB columns if you want the URL/path saved in the row.
+ACTIVITY_FEED_IMAGE_URL_COLUMN = os.getenv("ACTIVITY_FEED_IMAGE_URL_COLUMN", "image_url").strip()
+ACTIVITY_FEED_IMAGE_PATH_COLUMN = os.getenv("ACTIVITY_FEED_IMAGE_PATH_COLUMN", "image_path").strip()
+
 DEFAULT_ORG_ID: int | None = None
 if DEFAULT_ORG_ID_STR.isdigit():
     DEFAULT_ORG_ID = int(DEFAULT_ORG_ID_STR)
@@ -52,7 +61,7 @@ if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     print("✅ Supabase client initialized (service role).")
 else:
-    print("⚠️ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. DB inserts disabled.")
+    print("⚠️ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. DB inserts and storage uploads disabled.")
 
 if DEFAULT_ORG_ID is None:
     print("⚠️ DEFAULT_ORG_ID not set (or not a number). Inserts will fail if org_id is required.")
@@ -92,16 +101,71 @@ def speak_person_detected():
     threading.Thread(target=_worker, daemon=True).start()
 
 
-# -------------------- DB INSERT --------------------
+# -------------------- DB INSERT / STORAGE --------------------
 last_db_insert_time = 0.0
 
 
-def insert_activity_feed(title: str, *, org_id: int, occurred_at_iso: str):
+def encode_jpeg(frame: np.ndarray, quality: int = 90) -> bytes | None:
+    try:
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return None
+        return buf.tobytes()
+    except Exception as e:
+        print("[YOLO] JPEG encode error:", e)
+        return None
+
+
+def upload_detection_image(image_bytes: bytes, *, org_id: int) -> tuple[str | None, str | None]:
+    """
+    Upload full frame JPEG to Supabase Storage.
+    Returns (storage_path, public_url).
+    public_url is only directly viewable if the bucket is public.
+    """
+    if supabase is None:
+        return None, None
+
+    try:
+        now_gmt = time.gmtime()
+        date_prefix = time.strftime("%Y/%m/%d", now_gmt)
+        filename = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.jpg"
+        storage_path = f"org_{org_id}/{date_prefix}/{filename}"
+
+        supabase.storage.from_(DETECTION_IMAGE_BUCKET).upload(
+            path=storage_path,
+            file=image_bytes,
+            file_options={"content-type": "image/jpeg"},
+        )
+
+        public_url = None
+        try:
+            public_url = supabase.storage.from_(DETECTION_IMAGE_BUCKET).get_public_url(storage_path)
+        except Exception:
+            # Bucket may be private, which is okay.
+            public_url = None
+
+        print(f"✅ Uploaded detection frame to storage: {storage_path}")
+        return storage_path, public_url
+
+    except Exception as e:
+        print("❌ Supabase storage upload failed:", e)
+        return None, None
+
+
+def insert_activity_feed(
+    title: str,
+    *,
+    org_id: int,
+    occurred_at_iso: str,
+    image_url: str | None = None,
+    image_path: str | None = None,
+):
     """
     Insert into public.activity_feed:
       - title (varchar)
       - occurred_at (timestamptz)
       - org_id (bigint)
+      - optionally image_url / image_path if your schema has them
     """
     if supabase is None:
         return False
@@ -112,18 +176,83 @@ def insert_activity_feed(title: str, *, org_id: int, occurred_at_iso: str):
         "org_id": org_id,
     }
 
+    if image_url:
+        payload[ACTIVITY_FEED_IMAGE_URL_COLUMN] = image_url
+    if image_path:
+        payload[ACTIVITY_FEED_IMAGE_PATH_COLUMN] = image_path
+
     try:
-        supabase.table("activity_feed").insert(payload).execute()
+        supabase.table(ACTIVITY_FEED_TABLE).insert(payload).execute()
         print(f"✅ Supabase insert: {payload}")
         return True
     except Exception as e:
-        print("❌ Supabase insert failed:", e)
-        return False
+        print("❌ Supabase insert failed with image fields:", e)
+
+        # Fallback in case your table does not yet have image columns
+        fallback_payload = {
+            "title": title,
+            "occurred_at": occurred_at_iso,
+            "org_id": org_id,
+        }
+        try:
+            supabase.table(ACTIVITY_FEED_TABLE).insert(fallback_payload).execute()
+            print(f"✅ Supabase insert succeeded without image fields: {fallback_payload}")
+            return True
+        except Exception as e2:
+            print("❌ Supabase insert fallback failed:", e2)
+            return False
+
+
+def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float):
+    """
+    Handles audio + storage upload + DB alert on detection cooldown.
+    Uploads the full frame, not a crop.
+    """
+    global last_announce_time, last_db_insert_time
+
+    if num_boxes <= 0:
+        return
+
+    # voice
+    if (now - last_announce_time) >= ANNOUNCE_COOLDOWN:
+        last_announce_time = now
+        print(f"[YOLO] Person detected ({num_boxes}) → audio")
+        speak_person_detected()
+
+    # supabase insert (cooldown)
+    if (now - last_db_insert_time) >= DB_ALERT_COOLDOWN:
+        if DEFAULT_ORG_ID is None:
+            print("⚠️ DEFAULT_ORG_ID missing; cannot insert activity_feed row.")
+            return
+
+        occurred_at_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        title = f"Person detected ({num_boxes})"
+
+        frame_jpeg = encode_jpeg(frame, quality=90)
+        image_path = None
+        image_url = None
+
+        if frame_jpeg is not None:
+            image_path, image_url = upload_detection_image(
+                frame_jpeg,
+                org_id=DEFAULT_ORG_ID,
+            )
+
+        ok = insert_activity_feed(
+            title,
+            org_id=DEFAULT_ORG_ID,
+            occurred_at_iso=occurred_at_iso,
+            image_url=image_url,
+            image_path=image_path,
+        )
+
+        if ok:
+            last_db_insert_time = now
 
 
 # -------------------- STREAM --------------------
 def mjpeg_generator():
-    global last_announce_time, last_db_insert_time, _latest_frame_jpeg, _latest_frame_ts
+    global _latest_frame_jpeg, _latest_frame_ts
 
     last_infer = 0.0
     last_yolo_frame_ts = 0.0
@@ -135,7 +264,6 @@ def mjpeg_generator():
                 frame_ts = _latest_frame_ts
 
             if jpeg_data is None:
-                # No frame yet
                 time.sleep(0.05)
                 continue
 
@@ -160,34 +288,12 @@ def mjpeg_generator():
                     results = model(frame, classes=[0], verbose=False)
                     num_boxes = len(results[0].boxes)
 
-                    # draw boxes
-                    frame = results[0].plot()
-
+                    # Run alert logic on ORIGINAL frame
                     if num_boxes > 0:
-                        # voice
-                        if (now - last_announce_time) >= ANNOUNCE_COOLDOWN:
-                            last_announce_time = now
-                            print(f"[YOLO] Person detected ({num_boxes}) → audio")
-                            speak_person_detected()
+                        handle_person_detection(frame, num_boxes, now)
 
-                        # supabase insert (cooldown)
-                        if (now - last_db_insert_time) >= DB_ALERT_COOLDOWN:
-                            if DEFAULT_ORG_ID is not None:
-                                title = f"Person detected ({num_boxes})"
-                                occurred_at_iso = time.strftime(
-                                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                                )
-                                ok = insert_activity_feed(
-                                    title,
-                                    org_id=DEFAULT_ORG_ID,
-                                    occurred_at_iso=occurred_at_iso,
-                                )
-                                if ok:
-                                    last_db_insert_time = now
-                            else:
-                                print(
-                                    "⚠️ DEFAULT_ORG_ID missing; cannot insert activity_feed row."
-                                )
+                    # draw boxes for stream output
+                    frame = results[0].plot()
 
                 except Exception as e:
                     print("[YOLO] YOLO processing error:", e)
@@ -245,8 +351,8 @@ def mjpeg_generator():
                         if b == -1:
                             break
 
-                        jpg = bytes_buf[a : b + 2]
-                        bytes_buf = bytes_buf[b + 2 :]
+                        jpg = bytes_buf[a:b + 2]
+                        bytes_buf = bytes_buf[b + 2:]
                         last_frame_time = now_mono
 
                         img_array = np.frombuffer(jpg, dtype=np.uint8)
@@ -263,36 +369,12 @@ def mjpeg_generator():
                                 results = model(frame, classes=[0], verbose=False)
                                 num_boxes = len(results[0].boxes)
 
-                                # draw boxes
-                                frame = results[0].plot()
-
+                                # Run alert logic on ORIGINAL frame
                                 if num_boxes > 0:
-                                    # voice
-                                    if (now - last_announce_time) >= ANNOUNCE_COOLDOWN:
-                                        last_announce_time = now
-                                        print(
-                                            f"[YOLO] Person detected ({num_boxes}) → audio"
-                                        )
-                                        speak_person_detected()
+                                    handle_person_detection(frame, num_boxes, now)
 
-                                    # supabase insert (cooldown)
-                                    if (now - last_db_insert_time) >= DB_ALERT_COOLDOWN:
-                                        if DEFAULT_ORG_ID is not None:
-                                            title = f"Person detected ({num_boxes})"
-                                            occurred_at_iso = time.strftime(
-                                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                                            )
-                                            ok = insert_activity_feed(
-                                                title,
-                                                org_id=DEFAULT_ORG_ID,
-                                                occurred_at_iso=occurred_at_iso,
-                                            )
-                                            if ok:
-                                                last_db_insert_time = now
-                                        else:
-                                            print(
-                                                "⚠️ DEFAULT_ORG_ID missing; cannot insert activity_feed row."
-                                            )
+                                # draw boxes for stream output
+                                frame = results[0].plot()
 
                             except Exception as e:
                                 print("[YOLO] YOLO processing error:", e)
@@ -356,7 +438,7 @@ def upload_frame():
             if start == -1 or end == -1 or end <= start:
                 print("[YOLO] upload: invalid jpeg payload (len=", len(data), ")")
                 return "invalid jpeg", 400
-            data = data[start : end + 2]
+            data = data[start:end + 2]
 
         with _latest_frame_lock:
             _latest_frame_jpeg = data
@@ -383,10 +465,23 @@ def test_alert():
         return "DEFAULT_ORG_ID missing", 400
 
     occurred_at_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    test_img = np.zeros((240, 320, 3), dtype=np.uint8)
+    cv2.putText(test_img, "TEST ALERT", (40, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+    image_path = None
+    image_url = None
+
+    test_jpeg = encode_jpeg(test_img, quality=90)
+    if test_jpeg is not None:
+        image_path, image_url = upload_detection_image(test_jpeg, org_id=DEFAULT_ORG_ID)
+
     ok = insert_activity_feed(
         "Person detected (TEST)",
         org_id=DEFAULT_ORG_ID,
         occurred_at_iso=occurred_at_iso,
+        image_url=image_url,
+        image_path=image_path,
     )
     return ("insert ok" if ok else "insert failed"), (200 if ok else 500)
 
@@ -411,9 +506,13 @@ def status():
         "upload_mode": UPLOAD_MODE,
         "upload_fps": upload_fps,
         "mjpeg_url": "/mjpeg",
+        "bucket": DETECTION_IMAGE_BUCKET,
+        "activity_feed_table": ACTIVITY_FEED_TABLE,
     }
 
 
 if __name__ == "__main__":
-    # IMPORTANT: host 0.0.0.0 so other devices can access it via your PC LAN IP
-    app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)
+    bind_host = os.environ.get("YOLO_BIND_HOST", "0.0.0.0")
+    bind_port = int(os.environ.get("YOLO_PORT", "5000"))
+    print(f"[YOLO] Starting server on {bind_host}:{bind_port}")
+    app.run(host=bind_host, port=bind_port, threaded=True, debug=False)

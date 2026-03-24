@@ -104,16 +104,24 @@ const float Pitch_angle_td  = 0.04f;
 const float Pitch_angle_eta = 0.125f;
 
 // Altitude control PID gain
-const float alt_kp     = 0.45f;  // 5.0//soso 0.5
-const float alt_ti     = 10.0f;  // 200.0//soso 10.0
-const float alt_td     = 0.5f;   // 0.5//soso 0.5
+const float alt_kp     = 0.45f;
+const float alt_ti     = 10.0f;
+const float alt_td     = 0.45f;
 const float alt_eta    = 0.125f;
 const float alt_period = 0.0333;
 
-const float z_dot_kp  = 0.08f;  // 0.35//soso 0.1
-const float z_dot_ti  = 0.95f;  // 500.0//soso 0.95
-const float z_dot_td  = 0.08f;  // 0.15//1.0//soso 0.08
+const float z_dot_kp  = 0.09f;
+const float z_dot_ti  = 1.00f;
+const float z_dot_td  = 0.06f;
 const float z_dot_eta = 0.125f;
+
+const float Hover_trim_scale      = 1.10f;
+const float Payload_hover_boost_duty = 0.10f;
+const float Thrust0_adapt_gain    = 0.14f;
+const float Thrust0_adapt_margin  = 0.30f;
+const float Altitude_thrust_window_up   = 1.30f;
+const float Altitude_thrust_window_down = 0.80f;
+const float Auto_takeoff_boost_duty     = 0.10f;
 
 const float Duty_bias_up   = 1.581f;  // Altitude Control parameter　Itolab 1.589 M5Stack 1.581
 const float Duty_bias_down = 1.578f;  // Auto landing  parameter Itolab 1.578 M5Stack 1.578
@@ -133,9 +141,9 @@ constexpr float MARGIN_OF_ERROR_METERS = 0.0f;  // deadband in meters (~40 px at
 
 const float POS_PIXEL_SCALE         = 0.024f;  // m/px per meter altitude
 const float POS_SCALE_BASE_ALTITUDE = 0.38f;   // fallback altitude if sensor reading invalid
-volatile float Pos_kp_stick         = 0.005f;  // stick units per meter error
+volatile float Pos_kp_stick         = 0.12f;   // stick units per meter error
 volatile float Pos_ki_stick         = 0.0f;    // stick units per meter-second
-volatile float Pos_kd_stick         = 0.002f;  // stick units per m/s (velocity damping)
+volatile float Pos_kd_stick         = 0.08f;   // stick units per m/s (velocity damping)
 constexpr float POS_CMD_LIMIT       = 0.12f;   // absolute stick limit for position loop
 constexpr float POS_INT_LIMIT       = 0.02f;   // integrator clamp in stick units
 
@@ -144,6 +152,8 @@ uint8_t AngleControlCounter   = 0;
 uint16_t RateControlCounter   = 0;
 uint16_t OffsetCounter        = 0;
 uint16_t Auto_takeoff_counter = 0;
+uint16_t Flight_start_guard_counter = 0;
+constexpr uint16_t FLIGHT_START_GUARD_TICKS = 1200;  // ~3.0s @ 400Hz
 
 // Motor Duty
 volatile float FrontRight_motor_duty = 0.0f;
@@ -386,8 +396,11 @@ void loop_400Hz(void) {
     } else if (Mode == FLIGHT_MODE) {
         Control_period = Interval_time;
 
-        if (judge_mode_change() == 1) Mode = AUTO_LANDING_MODE;
-        if (rc_isconnected() == 0) Mode = AUTO_LANDING_MODE;
+        if (Flight_start_guard_counter > 0) Flight_start_guard_counter--;
+        bool allow_flight_abort = (Flight_start_guard_counter == 0);
+
+        if (allow_flight_abort && judge_mode_change() == 1) Mode = AUTO_LANDING_MODE;
+        if (allow_flight_abort && rc_isconnected() == 0) Mode = AUTO_LANDING_MODE;
         if (OverG_flag == 1) Mode = PARKING_MODE;
         if (Mode != OldMode) ahrs_reset();
 
@@ -400,6 +413,7 @@ void loop_400Hz(void) {
                 ahrs_reset();
             }
             Mode = FLIGHT_MODE;
+            Flight_start_guard_counter = FLIGHT_START_GUARD_TICKS;
         }
         if (last_ahrs_reset_flag != ahrs_reset_flag) {
             if (ahrs_reset_flag == 1) {
@@ -422,6 +436,7 @@ void loop_400Hz(void) {
         Stick_return_flag    = 0;
         Landing_state        = 0;
         Auto_takeoff_counter = 0;
+        Flight_start_guard_counter = 0;
         Thrust_filtered.reset();
         EstimatedAltitude.reset();
         Duty_fr.reset();
@@ -512,8 +527,12 @@ void control_init(void) {
 
 float get_trim_duty(float voltage) {
     // Original (716 motors, 24mm props): -0.2448 * V + 1.5892
-    // Scaled 1.05x for 720 motors + 31mm props + 30% payload increase
-    return (-0.2448f * voltage + 1.5892f) * 1.35f;
+    // Faster/more powerful motors require less duty for hover.
+    // Keep this as a conservative baseline; Thrust0 is auto-trimmed in flight.
+    float duty = (-0.2448f * voltage + 1.5892f) * Hover_trim_scale + Payload_hover_boost_duty;
+    if (duty < 0.0f) duty = 0.0f;
+    if (duty > 0.95f) duty = 0.95f;
+    return duty;
 }
 
 float get_rate_ref(float x) {
@@ -563,16 +582,20 @@ void get_command(void) {
     } else if (Throttle_control_mode == 1) {
         // Auto Throttle Altitude Control
         Alt_flag = 1;
+        float target_hover_duty = get_trim_duty(Voltage);
+
         if (Auto_takeoff_counter < 500) {
             Thrust0 = (float)Auto_takeoff_counter / 1000.0;
             if (Thrust0 > get_trim_duty(3.8)) Thrust0 = get_trim_duty(3.8);
             Auto_takeoff_counter++;
         } else if (Auto_takeoff_counter < 1000) {
             Thrust0 = (float)Auto_takeoff_counter / 1000.0;
-            if (Thrust0 > get_trim_duty(Voltage)) Thrust0 = get_trim_duty(Voltage);
+            if (Thrust0 > target_hover_duty) Thrust0 = target_hover_duty;
             Auto_takeoff_counter++;
-        } else
-            Thrust0 = get_trim_duty(Voltage);
+        } else if (Auto_takeoff_counter == 1000) {
+            Thrust0 = target_hover_duty;
+            Auto_takeoff_counter++;
+        }
 
         // Get Altitude ref
         if ((-0.2 < thlo) && (thlo < 0.2)) thlo = 0.0f;  // 不感帯
@@ -706,10 +729,16 @@ void rate_control(void) {
         // Altutude Control
         if (Alt_flag == 1 && Flip_flag == 0) {
             z_dot_err      = Z_dot_ref - Alt_velocity;
+            float lift_boost = 0.0f;
+            if (Auto_takeoff_counter < 1400 && Altitude2 < 0.30f) {
+                lift_boost = Auto_takeoff_boost_duty;
+            }
             Thrust_command = Thrust_filtered.update(
-                (Thrust0 + z_dot_pid.update(z_dot_err, Interval_time)) * BATTERY_VOLTAGE, Interval_time);
-            if (Thrust_command / BATTERY_VOLTAGE > Thrust0 * 1.15f) Thrust_command = BATTERY_VOLTAGE * Thrust0 * 1.15f;
-            if (Thrust_command / BATTERY_VOLTAGE < Thrust0 * 0.85f) Thrust_command = BATTERY_VOLTAGE * Thrust0 * 0.85f;
+                (Thrust0 + lift_boost + z_dot_pid.update(z_dot_err, Interval_time)) * BATTERY_VOLTAGE, Interval_time);
+            if (Thrust_command / BATTERY_VOLTAGE > Thrust0 * Altitude_thrust_window_up)
+                Thrust_command = BATTERY_VOLTAGE * Thrust0 * Altitude_thrust_window_up;
+            if (Thrust_command / BATTERY_VOLTAGE < Thrust0 * Altitude_thrust_window_down)
+                Thrust_command = BATTERY_VOLTAGE * Thrust0 * Altitude_thrust_window_down;
         } else if (Mode == AUTO_LANDING_MODE) {
             z_dot_err      = -0.15 - Alt_velocity;
             Thrust_command = Thrust_filtered.update(
@@ -733,8 +762,8 @@ void rate_control(void) {
             (Thrust_command + (Roll_rate_command - Pitch_rate_command + Yaw_rate_command) * 0.25f) / BATTERY_VOLTAGE,
             Interval_time);
 
-        const float minimum_duty = 0.0f;
-        const float maximum_duty = 0.95f;
+        const float minimum_duty = 0.05f;
+        const float maximum_duty = 0.98f;
 
         if (FrontRight_motor_duty < minimum_duty) FrontRight_motor_duty = minimum_duty;
         if (FrontRight_motor_duty > maximum_duty) FrontRight_motor_duty = maximum_duty;
@@ -840,9 +869,7 @@ static void update_position_hold(float dt_sec) {
     static float prev_pitch_cmd = 0.0f;
 
     if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0 || Position_estimate_valid == 0) {
-        if (PositionHold_flag != 0 && Position_estimate_valid == 0) {
-            PositionHold_flag = 0;
-        }
+        // Don't permanently clear PositionHold_flag — resume when estimate recovers
         pos_i_x = 0.0f;
         pos_i_y = 0.0f;
         last_x  = current_x;
@@ -930,7 +957,7 @@ static void update_position_hold(float dt_sec) {
     roll_cmd  = clampf(roll_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
     pitch_cmd = clampf(pitch_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
 
-    float max_delta             = 0.02f;
+    float max_delta             = 0.05f;
     float roll_step             = clampf(roll_cmd - prev_roll_cmd, -max_delta, max_delta);
     float pitch_step            = clampf(pitch_cmd - prev_pitch_cmd, -max_delta, max_delta);
     roll_cmd                    = prev_roll_cmd + roll_step;
@@ -971,7 +998,16 @@ void angle_control(void) {
     } else {
         // Altitude Control PID
         alt_err = Alt_ref - Altitude2;
-        if (Alt_flag >= 1) Z_dot_ref = alt_pid.update(alt_err, Interval_time);
+        if (Alt_flag >= 1) {
+            Z_dot_ref = alt_pid.update(alt_err, Interval_time);
+
+            if (Auto_takeoff_counter >= 1000) {
+                float trim_duty = get_trim_duty(Voltage);
+                Thrust0 += Thrust0_adapt_gain * alt_err * Interval_time;
+                if (Thrust0 > trim_duty + Thrust0_adapt_margin) Thrust0 = trim_duty + Thrust0_adapt_margin;
+                if (Thrust0 < trim_duty - Thrust0_adapt_margin) Thrust0 = trim_duty - Thrust0_adapt_margin;
+            }
+        }
 
         update_position_hold(Interval_time);
 
@@ -1076,9 +1112,29 @@ void auto_takeoff_and_hover(float target_altitude) {
     reset_position_state();
 
     Alt_ref = target_altitude;
+    Auto_takeoff_counter = 0;
+    Thrust0 = 0.0f;
+    Thrust_command = 0.0f;
+
+    Stick[THROTTLE] = 0.0f;
+    Stick[AILERON]  = 0.0f;
+    Stick[ELEVATOR] = 0.0f;
+    Stick[RUDDER]   = 0.0f;
+    Stick[CONTROLMODE] = ANGLECONTROL;
+    Stick[ALTCONTROLMODE] = AUTO_ALT;
+
+    Roll_angle_command   = 0.0f;
+    Pitch_angle_command  = 0.0f;
+    Yaw_angle_command    = 0.0f;
+    Roll_rate_reference  = 0.0f;
+    Pitch_rate_reference = 0.0f;
+    Yaw_rate_reference   = 0.0f;
+    Aileron_center       = 0.0f;
+    Elevator_center      = 0.0f;
+    Rudder_center        = 0.0f;
 
     Mode                  = FLIGHT_MODE;
-    Stick[ALTCONTROLMODE] = AUTO_ALT;
+    Flight_start_guard_counter = FLIGHT_START_GUARD_TICKS;
     PositionHold_flag     = 1;
 
     // initialize the lateral hold target to the current sensor-based position
