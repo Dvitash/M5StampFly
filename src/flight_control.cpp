@@ -71,6 +71,9 @@ const int FrontRight_motor = 1;
 const int RearLeft_motor   = 2;
 const int RearRight_motor  = 3;
 
+// if only fl/rr motor leads are crossed at esc, set true; else false
+constexpr bool kMotorSwapFlRrOutputs = false;
+
 // idle floor: escs never see 0% while stabilizing (avoids sync loss; all four spin at least this)
 constexpr float MOTOR_MIN_DUTY = 0.001f;
 constexpr float MOTOR_MAX_DUTY = 0.98f;
@@ -89,31 +92,31 @@ static constexpr float kTiltIntegralResetRad = 1.0f;
 float Control_period = 0.0025f;  // 400Hz
 
 // PID Gain
-// Rate control PID gain
-const float Roll_rate_kp  = 0.65f;
-const float Roll_rate_ti  = 0.7f;
-const float Roll_rate_td  = 0.01;
+// Rate control PID gain (tuned heavier payload: higher kp, slightly lower ti = snappier)
+const float Roll_rate_kp  = 0.95f;
+const float Roll_rate_ti  = 0.55f;
+const float Roll_rate_td  = 0.012f;
 const float Roll_rate_eta = 0.125f;
 
-const float Pitch_rate_kp  = 0.95f;
-const float Pitch_rate_ti  = 0.7f;
-const float Pitch_rate_td  = 0.025f;
+const float Pitch_rate_kp  = 1.3f;
+const float Pitch_rate_ti  = 0.55f;
+const float Pitch_rate_td  = 0.028f;
 const float Pitch_rate_eta = 0.125f;
 
-const float Yaw_rate_kp  = 3.0f;
-const float Yaw_rate_ti  = 0.8f;
+const float Yaw_rate_kp  = 3.5f;
+const float Yaw_rate_ti  = 0.65f;
 const float Yaw_rate_td  = 0.01f;
 const float Yaw_rate_eta = 0.125f;
 
 // Angle control PID gain (operates on Roll_angle / Pitch_angle from sensor.cpp AHRS remap)
-const float Roll_angle_kp  = 5.0f;  // 8.0
-const float Roll_angle_ti  = 4.0f;
-const float Roll_angle_td  = 0.04f;
+const float Roll_angle_kp  = 7.5f;
+const float Roll_angle_ti  = 3.0f;
+const float Roll_angle_td  = 0.045f;
 const float Roll_angle_eta = 0.125f;
 
-const float Pitch_angle_kp  = 5.0f;  // 8.0
-const float Pitch_angle_ti  = 4.0f;
-const float Pitch_angle_td  = 0.04f;
+const float Pitch_angle_kp  = 7.5f;
+const float Pitch_angle_ti  = 3.0f;
+const float Pitch_angle_td  = 0.045f;
 const float Pitch_angle_eta = 0.125f;
 
 // Altitude control PID gain
@@ -522,17 +525,17 @@ void control_init(void) {
                         Control_period);  // Pitch rate control gain
     r_pid.set_parameter(Yaw_rate_kp, Yaw_rate_ti, Yaw_rate_td, Yaw_rate_eta, Control_period);  // Yaw rate control gain
     // anti windup: legacy pid allowed ±30000 on i-term → huge Roll_rate_command, mixer pins two motors at min
-    p_pid.set_integral_limit(15.0f);
-    q_pid.set_integral_limit(15.0f);
-    r_pid.set_integral_limit(25.0f);
+    p_pid.set_integral_limit(18.0f);
+    q_pid.set_integral_limit(18.0f);
+    r_pid.set_integral_limit(28.0f);
 
     // Angle control
     phi_pid.set_parameter(Roll_angle_kp, Roll_angle_ti, Roll_angle_td, Roll_angle_eta,
                           Control_period);  // Roll angle control gain
     theta_pid.set_parameter(Pitch_angle_kp, Pitch_angle_ti, Pitch_angle_td, Pitch_angle_eta,
                             Control_period);  // Pitch angle control gain
-    phi_pid.set_integral_limit(0.55f);
-    theta_pid.set_integral_limit(0.55f);
+    phi_pid.set_integral_limit(0.65f);
+    theta_pid.set_integral_limit(0.65f);
 
     // Altitude control
     alt_pid.set_parameter(alt_kp, alt_ti, alt_td, alt_eta, alt_period);
@@ -783,19 +786,22 @@ void rate_control(void) {
         // Motor Control
         // 正規化Duty (clamp before lp; snap filters when leaving extreme tilt so one channel cannot lag)
         {
-            float ra = Roll_angle - Roll_angle_offset;
-            float pa = Pitch_angle - Pitch_angle_offset;
-            bool  tilt_extreme =
-                fabsf(ra) > kTiltIntegralResetRad || fabsf(pa) > kTiltIntegralResetRad;
+            float ra          = Roll_angle - Roll_angle_offset;
+            float pa          = Pitch_angle - Pitch_angle_offset;
+            bool tilt_extreme = fabsf(ra) > kTiltIntegralResetRad || fabsf(pa) > kTiltIntegralResetRad;
 
             float u_fr = clamp_motor_raw_duty(
-                (Thrust_command + (-Roll_rate_command + Pitch_rate_command + Yaw_rate_command) * 0.25f) / BATTERY_VOLTAGE);
+                (Thrust_command + (-Roll_rate_command + Pitch_rate_command + Yaw_rate_command) * 0.25f) /
+                BATTERY_VOLTAGE);
             float u_fl = clamp_motor_raw_duty(
-                (Thrust_command + (Roll_rate_command + Pitch_rate_command - Yaw_rate_command) * 0.25f) / BATTERY_VOLTAGE);
+                (Thrust_command + (Roll_rate_command + Pitch_rate_command - Yaw_rate_command) * 0.25f) /
+                BATTERY_VOLTAGE);
             float u_rr = clamp_motor_raw_duty(
-                (Thrust_command + (-Roll_rate_command - Pitch_rate_command - Yaw_rate_command) * 0.25f) / BATTERY_VOLTAGE);
+                (Thrust_command + (-Roll_rate_command - Pitch_rate_command - Yaw_rate_command) * 0.25f) /
+                BATTERY_VOLTAGE);
             float u_rl = clamp_motor_raw_duty(
-                (Thrust_command + (Roll_rate_command - Pitch_rate_command + Yaw_rate_command) * 0.25f) / BATTERY_VOLTAGE);
+                (Thrust_command + (Roll_rate_command - Pitch_rate_command + Yaw_rate_command) * 0.25f) /
+                BATTERY_VOLTAGE);
 
             if (s_motor_duty_was_tilt_extreme && !tilt_extreme) {
                 Duty_fr.set_state(u_fr);
@@ -826,8 +832,13 @@ void rate_control(void) {
         // Duty set
         if (OverG_flag == 0) {
             set_duty_fr(FrontRight_motor_duty);
-            set_duty_fl(FrontLeft_motor_duty);
-            set_duty_rr(RearRight_motor_duty);
+            if (kMotorSwapFlRrOutputs) {
+                set_duty_fl(RearRight_motor_duty);
+                set_duty_rr(FrontLeft_motor_duty);
+            } else {
+                set_duty_fl(FrontLeft_motor_duty);
+                set_duty_rr(RearRight_motor_duty);
+            }
             set_duty_rl(RearLeft_motor_duty);
         } else {
             FrontRight_motor_duty = 0.0;

@@ -282,10 +282,10 @@ float sensor_read(void) {
         Pitch_rate = raw_gy_filter.update(Pitch_rate_raw - Pitch_rate_offset, Interval_time);
         Yaw_rate   = raw_gz_filter.update(Yaw_rate_raw - Yaw_rate_offset, Interval_time);
 
-        Drone_ahrs.updateIMU((Pitch_rate) * (float)RAD_TO_DEG, (Roll_rate) * (float)RAD_TO_DEG,
+        Drone_ahrs.updateIMU((Roll_rate) * (float)RAD_TO_DEG, (Pitch_rate) * (float)RAD_TO_DEG,
                              -(Yaw_rate) * (float)RAD_TO_DEG, Accel_y, Accel_x, -Accel_z);
-        Roll_angle  = Drone_ahrs.getPitch() * (float)DEG_TO_RAD;
-        Pitch_angle = Drone_ahrs.getRoll() * (float)DEG_TO_RAD;
+        Roll_angle  = Drone_ahrs.getRoll() * (float)DEG_TO_RAD;
+        Pitch_angle = Drone_ahrs.getPitch() * (float)DEG_TO_RAD;
         Yaw_angle   = -Drone_ahrs.getYaw() * (float)DEG_TO_RAD;
 
         bool gotMotion = false;
