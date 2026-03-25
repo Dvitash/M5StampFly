@@ -27,14 +27,19 @@
 #include "pid.hpp"
 
 PID::PID() {
-    m_kp           = 1.0e-8f;
-    m_ti           = 1.0e8f;
-    m_td           = 0.0f;
-    m_eta          = 0.01;
-    m_integral     = 0.0f;
-    m_differential = 0.0f;
-    m_err          = 0.0f;
-    m_h            = 0.01f;
+    m_kp               = 1.0e-8f;
+    m_ti               = 1.0e8f;
+    m_td               = 0.0f;
+    m_eta              = 0.01;
+    m_integral         = 0.0f;
+    m_differential     = 0.0f;
+    m_err              = 0.0f;
+    m_h                = 0.01f;
+    m_integral_limit   = 0.0f;
+}
+
+void PID::set_integral_limit(float abs_max) {
+    m_integral_limit = abs_max >= 0.0f ? abs_max : 0.0f;
 }
 
 void PID::set_parameter(float kp, float ti, float td, float eta, float h) {
@@ -70,8 +75,13 @@ float PID::update(float err, float h) {
 
     // 積分
     m_integral = m_integral + m_h * (err + m_err) / 2 / m_ti;
-    if (m_integral > 30000.0f) m_integral = 30000.0f;
-    if (m_integral < -30000.0f) m_integral = -30000.0f;
+    if (m_integral_limit > 0.0f) {
+        if (m_integral > m_integral_limit) m_integral = m_integral_limit;
+        if (m_integral < -m_integral_limit) m_integral = -m_integral_limit;
+    } else {
+        if (m_integral > 30000.0f) m_integral = 30000.0f;
+        if (m_integral < -30000.0f) m_integral = -30000.0f;
+    }
     // 不完全微分
     m_differential = (2 * m_eta * m_td - m_h) * m_differential / (2 * m_eta * m_td + m_h) +
                      2 * m_td * (err - m_err) / (2 * m_eta * m_td + m_h);
@@ -87,6 +97,11 @@ Filter::Filter() {
 
 void Filter::reset(void) {
     m_state = 0.0f;
+}
+
+void Filter::set_state(float u) {
+    m_state = u;
+    m_out   = u;
 }
 
 void Filter::set_parameter(float T, float h) {

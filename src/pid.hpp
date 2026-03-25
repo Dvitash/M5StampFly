@@ -34,12 +34,15 @@ class PID {
     float m_eta;
     float m_err, m_err2, m_err3;
     float m_h;
+    // if > 0, |m_integral| clamped to this (same units as err); 0 = legacy ±30000
+    float m_integral_limit;
 
    public:
     float m_differential;
     float m_integral;
     PID();
     void set_parameter(float kp, float ti, float td, float eta, float h);
+    void set_integral_limit(float abs_max);
     void reset(void);
     void i_reset(void);
     void printGain(void);
@@ -58,6 +61,7 @@ class Filter {
     Filter();
     void set_parameter(float T, float h);
     void reset(void);
+    void set_state(float u);
     float update(float u, float h);
 };
 

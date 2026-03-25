@@ -104,10 +104,10 @@ extern const float Yaw_rate_td;
 extern const float Yaw_rate_eta;
 
 // Angle control PID gain
-extern const float Rall_angle_kp;
-extern const float Rall_angle_ti;
-extern const float Rall_angle_td;
-extern const float Rall_angle_eta;
+extern const float Roll_angle_kp;
+extern const float Roll_angle_ti;
+extern const float Roll_angle_td;
+extern const float Roll_angle_eta;
 
 extern const float Pitch_angle_kp;
 extern const float Pitch_angle_ti;

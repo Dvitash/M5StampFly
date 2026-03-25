@@ -111,10 +111,10 @@ void make_telemetry_header_data(uint8_t* senddata) {
     data_set(senddata, Yaw_rate_ti, &index);
     data_set(senddata, Yaw_rate_td, &index);
     data_set(senddata, Yaw_rate_eta, &index);
-    data_set(senddata, Rall_angle_kp, &index);
-    data_set(senddata, Rall_angle_ti, &index);
-    data_set(senddata, Rall_angle_td, &index);
-    data_set(senddata, Rall_angle_eta, &index);
+    data_set(senddata, Roll_angle_kp, &index);
+    data_set(senddata, Roll_angle_ti, &index);
+    data_set(senddata, Roll_angle_td, &index);
+    data_set(senddata, Roll_angle_eta, &index);
     data_set(senddata, Pitch_angle_kp, &index);
     data_set(senddata, Pitch_angle_ti, &index);
     data_set(senddata, Pitch_angle_td, &index);
