@@ -267,7 +267,7 @@ float sensor_read(void) {
         vel_y_filter.reset();
         Vel_x = 0.0f;
         Vel_y = 0.0f;
-        Position_estimate_valid = 0;
+        // Position_estimate_valid is owned by UWB (rc.cpp) — do not reset here.
 
         acc_filter.reset();
     }
@@ -287,57 +287,7 @@ float sensor_read(void) {
         Roll_angle  = Drone_ahrs.getRoll() * (float)DEG_TO_RAD;
         Pitch_angle = Drone_ahrs.getPitch() * (float)DEG_TO_RAD;
         Yaw_angle   = -Drone_ahrs.getYaw() * (float)DEG_TO_RAD;
-
-        bool gotMotion = false;
-        if (g_flow_initialized) {
-            flow.readMotion(deltaX, deltaY, gotMotion);
-        }
-
-        static float flow_no_data_time = 0.0f;
-        flow_no_data_time += sens_interval;
-
-        if (gotMotion && Altitude2 > 0.10f) {
-            float meters_per_pixel = POS_PIXEL_SCALE * ((Altitude2 > 0.05f) ? Altitude2 : POS_SCALE_BASE_ALTITUDE);
-
-            float body_dx_m = static_cast<float>(deltaX) * meters_per_pixel;
-            float body_dy_m = static_cast<float>(deltaY) * meters_per_pixel;
-
-            float yaw = Yaw_angle + PI;
-            if (yaw > PI) yaw -= 2.0f * PI;
-            if (yaw < -PI) yaw += 2.0f * PI;
-
-            float cos_yaw = cosf(yaw);
-            float sin_yaw = sinf(yaw);
-
-            float world_dx = cos_yaw * body_dx_m - sin_yaw * body_dy_m;
-            float world_dy = sin_yaw * body_dx_m + cos_yaw * body_dy_m;
-
-            float dt = opt_interval;
-            if (dt < 1.0e-4f) dt = sens_interval;
-            opt_interval = 0.0f;
-
-            current_x += world_dx;
-            current_y += world_dy;
-
-            float raw_vel_x = world_dx / dt;
-            float raw_vel_y = world_dy / dt;
-            Vel_x           = vel_x_filter.update(raw_vel_x, dt);
-            Vel_y           = vel_y_filter.update(raw_vel_y, dt);
-
-            Position_estimate_valid = 1;
-            flow_no_data_time       = 0.0f;
-        } else {
-            Vel_x = vel_x_filter.update(0.0f, sens_interval);
-            Vel_y = vel_y_filter.update(0.0f, sens_interval);
-
-            if (!g_flow_initialized || Altitude2 < 0.08f || flow_no_data_time > 0.35f) {
-                Position_estimate_valid = 0;
-            }
-            if (flow_no_data_time > 1.0f) {
-                opt_interval = 0.0f;
-            }
-        }
-
+        
         // for debug
         // USBSerial.printf("%6.3f %7.4f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f\n\r",
         //   Elapsed_time, Interval_time, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z);

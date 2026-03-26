@@ -947,18 +947,11 @@ static void update_position_hold(float dt_sec) {
         return;
     }
 
-    float vel_x_meas = Vel_x;
-    float vel_y_meas = Vel_y;
-    if (!isfinite(vel_x_meas)) vel_x_meas = 0.0f;
-    if (!isfinite(vel_y_meas)) vel_y_meas = 0.0f;
-
-    float vel_x_est = (current_x - last_x) / dt_sec;
-    float vel_y_est = (current_y - last_y) / dt_sec;
-    last_x          = current_x;
-    last_y          = current_y;
-
-    float vel_x = 0.85f * vel_x_meas + 0.15f * vel_x_est;
-    float vel_y = 0.85f * vel_y_meas + 0.15f * vel_y_est;
+    // Vel_x/Vel_y are now computed directly from consecutive UWB updates (rc.cpp).
+    float vel_x = isfinite(Vel_x) ? Vel_x : 0.0f;
+    float vel_y = isfinite(Vel_y) ? Vel_y : 0.0f;
+    last_x = current_x;
+    last_y = current_y;
 
     float err_x = target_x - current_x;
     float err_y = target_y - current_y;
@@ -1068,6 +1061,7 @@ void angle_control(void) {
         }
 
         update_position_hold(Interval_time);
+        uwb_staleness_check();
 
         if (Control_mode == ANGLECONTROL) {
             {

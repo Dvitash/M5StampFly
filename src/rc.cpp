@@ -30,6 +30,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 #include "flight_control.hpp"
 #include "sensor.hpp"
 #include <buzzer.h>
@@ -47,17 +48,18 @@
 extern volatile float acc_x, acc_y, acc_z;
 extern volatile float gyro_x, gyro_y, gyro_z;
 extern volatile float current_x, current_y;
-extern volatile float current_x, current_y;
 extern volatile float target_x, target_y;
 extern volatile uint8_t PositionHold_flag;
 extern volatile uint8_t Mode;
 
 WebServer server(80);
+WebSocketsServer wsServer(82);
 
 // webserver task to handle http requests independently
 static void webserver_task(void *param) {
     for (;;) {
         server.handleClient();
+        wsServer.loop();
         // small delay to yield but keep responsiveness high
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -690,12 +692,17 @@ void handle_telemetry() {
     server.sendHeader("Cache-Control", "no-cache");
 
     // use cached imu values updated in main loop - no need to read spi here
-    char json[320];
+    char json[640];
     snprintf(json, sizeof(json),
-             "{\"t_us\":%u,\"acc\":[%.6f,%.6f,%.6f],\"gyro\":[%.6f,%.6f,%.6f],\"rc_ok\":%s,\"flow_pos\":[%.2f,%.2f],"
+             "{\"t_us\":%u,\"acc\":[%.6f,%.6f,%.6f],\"gyro\":[%.6f,%.6f,%.6f],\"rc_ok\":%s,"
+             "\"flow_valid\":%u,\"pos_hold\":%u,\"flow_pos\":[%.3f,%.3f],\"flow_vel\":[%.3f,%.3f],"
+             "\"target\":[%.3f,%.3f],\"mode\":%u,\"motor\":[%.3f,%.3f,%.3f,%.3f],"
              "\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"}",
              (uint32_t)micros(), acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, rc_isconnected() ? "true" : "false",
-             current_x, current_y, MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+             (unsigned int)Position_estimate_valid, (unsigned int)PositionHold_flag, current_x, current_y, Vel_x,
+             Vel_y, target_x, target_y, (unsigned int)Mode, FrontRight_motor_duty, FrontLeft_motor_duty,
+             RearRight_motor_duty, RearLeft_motor_duty, MyMacAddr[0], MyMacAddr[1], MyMacAddr[2], MyMacAddr[3],
+             MyMacAddr[4], MyMacAddr[5]);
     server.send(200, "application/json", json);
 }
 
@@ -725,6 +732,115 @@ void handle_reset_position() {
     current_x = 0.0f;
     current_y = 0.0f;
     server.send(200, "text/plain", "OK");
+}
+
+// UWB position ownership vars
+static volatile uint32_t g_uwb_last_update_ms = 0;
+static uint32_t g_uwb_rate_log_ms   = 0;
+static uint32_t g_uwb_rx_count      = 0;
+// Previous UWB position for velocity estimation
+static float g_uwb_prev_x = 0.0f;
+static float g_uwb_prev_y = 0.0f;
+static uint32_t g_uwb_prev_ms = 0;
+
+// WebSocket event handler for high-frequency UWB position stream on port 82.
+// Accepts compact JSON frames: {"x":1.234,"y":2.345,"z":0.500}
+static void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
+    if (type != WStype_TEXT || length == 0) return;
+
+    const char *s  = (const char *)payload;
+    const char *xp = strstr(s, "\"x\":");
+    const char *yp = strstr(s, "\"y\":");
+    if (!xp || !yp) return;
+
+    float x = atof(xp + 4);
+    float y = atof(yp + 4);
+    float z = 0.0f;
+    const char *zp = strstr(s, "\"z\":");
+    if (zp) z = atof(zp + 4);
+
+    if (!std::isfinite(x) || !std::isfinite(y)) return;
+
+    uint32_t now = millis();
+
+    if (g_uwb_prev_ms > 0) {
+        float dt_s = (now - g_uwb_prev_ms) * 1.0e-3f;
+        if (dt_s > 0.005f && dt_s < 1.0f) {
+            Vel_x = (x - g_uwb_prev_x) / dt_s;
+            Vel_y = (y - g_uwb_prev_y) / dt_s;
+        }
+    }
+    g_uwb_prev_x  = x;
+    g_uwb_prev_y  = y;
+    g_uwb_prev_ms = now;
+
+    current_x               = x;
+    current_y               = y;
+    Position_estimate_valid = 1;
+    g_uwb_last_update_ms    = now;
+
+    g_uwb_rx_count++;
+    if (now - g_uwb_rate_log_ms >= 1000) {
+        uint32_t hz = g_uwb_rx_count;
+        g_uwb_rx_count    = 0;
+        g_uwb_rate_log_ms = now;
+        print("UWB RX rate: %lu Hz (WS), latest x=%.3f y=%.3f z=%.3f\r\n", hz, x, y, z);
+    }
+}
+
+// Must be called from the 400 Hz loop to age-out stale UWB and invalidate position hold.
+void uwb_staleness_check(void) {
+    if (g_uwb_last_update_ms == 0) return;  // never received any update
+    if ((millis() - g_uwb_last_update_ms) > 500) {
+        Position_estimate_valid = 0;
+        Vel_x = 0.0f;
+        Vel_y = 0.0f;
+    }
+}
+
+static void handle_uwb_position() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    if (!server.hasArg("x") || !server.hasArg("y")) {
+        server.send(400, "text/plain", "missing x or y");
+        return;
+    }
+    float x = server.arg("x").toFloat();
+    float y = server.arg("y").toFloat();
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        server.send(400, "text/plain", "bad coords");
+        return;
+    }
+
+    uint32_t now = millis();
+
+    // Compute UWB-derived velocity (only when we have a valid previous sample).
+    if (g_uwb_prev_ms > 0) {
+        float dt_s = (now - g_uwb_prev_ms) * 1.0e-3f;
+        if (dt_s > 0.01f && dt_s < 1.0f) {
+            Vel_x = (x - g_uwb_prev_x) / dt_s;
+            Vel_y = (y - g_uwb_prev_y) / dt_s;
+        }
+    }
+    g_uwb_prev_x  = x;
+    g_uwb_prev_y  = y;
+    g_uwb_prev_ms = now;
+
+    current_x               = x;
+    current_y               = y;
+    Position_estimate_valid = 1;
+    g_uwb_last_update_ms    = now;
+
+    g_uwb_rx_count++;
+    if (now - g_uwb_rate_log_ms >= 1000) {
+        uint32_t hz = g_uwb_rx_count;
+        g_uwb_rx_count    = 0;
+        g_uwb_rate_log_ms = now;
+        print("UWB RX rate: %lu Hz, latest x=%.3f y=%.3f z=%s\r\n", hz, x, y,
+              server.hasArg("z") ? server.arg("z").c_str() : "na");
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"ok\":true,\"x\":%.3f,\"y\":%.3f}", x, y);
+    server.send(200, "application/json", buf);
 }
 
 static void handle_target_get() {
@@ -1122,6 +1238,8 @@ void rc_init(void) {
     server.on("/pos/gains", HTTP_POST, handle_pos_gains_set);
     server.on("/sequence", HTTP_POST, handle_sequence);
     server.on("/sequence/stop", HTTP_GET, handle_sequence_stop);
+    server.on("/uwb/position", HTTP_POST, handle_uwb_position);
+    server.on("/uwb/position", HTTP_GET, handle_uwb_position);
 
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
@@ -1136,6 +1254,7 @@ void rc_init(void) {
     server.on("/pos/gains", HTTP_OPTIONS, handle_options);
     server.on("/sequence", HTTP_OPTIONS, handle_options);
     server.on("/sequence/stop", HTTP_OPTIONS, handle_options);
+    server.on("/uwb/position", HTTP_OPTIONS, handle_options);
 
     server.on("/camera/stream", HTTP_GET, []() {
         server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -1207,6 +1326,10 @@ void rc_init(void) {
     server.on("/camera/upstream", HTTP_OPTIONS, handle_options);
 
     server.begin();
+
+    // start WebSocket server on port 82 for high-frequency UWB position stream
+    wsServer.begin();
+    wsServer.onEvent(webSocketEvent);
 
     // start webserver in separate task so it doesn't block control loop
     xTaskCreatePinnedToCore(webserver_task, "webserver", 8192, nullptr, 1, nullptr, 1);
