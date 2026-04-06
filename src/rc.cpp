@@ -68,6 +68,46 @@ static void webserver_task(void *param) {
 // org_id from drone_org_registry_map, -1 = not yet fetched
 static int8_t g_org_id = -1;
 
+// Post only battery voltage and WiFi RSSI after retrieving data.
+static void post_drone_dashboard_state() {
+    if (WiFi.status() != WL_CONNECTED || g_org_id < 0) return;
+
+    const char *url = "https://" SUPABASE_PROJECT_ID ".supabase.co/rest/v1/drone_dashboard_state";
+    long wifi_rssi  = WiFi.RSSI();
+    String payload  = "{";
+    payload += "\"org_id\":";
+    payload += String((int)g_org_id);
+    payload += ",\"battery_voltage\":";
+    payload += String(Voltage, 3);
+    payload += ",\"wifi_rssi\":";
+    payload += String(wifi_rssi);
+    payload += "}";
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.begin(client, url);
+    http.addHeader("apikey", SUPABASE_ANON_KEY);
+    http.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Prefer", "return=minimal");
+    http.setTimeout(5000);
+
+    int post_code = http.POST(payload);
+    if (post_code < 200 || post_code >= 300) {
+        serial_logger_usb_print("sample POST failed: ");
+        serial_logger_usb_print(String(post_code).c_str());
+        String post_body = http.getString();
+        if (post_body.length() > 0) {
+            serial_logger_usb_print(" ");
+            serial_logger_usb_println(post_body.c_str());
+        } else {
+            serial_logger_usb_println("");
+        }
+    }
+    http.end();
+}
+
 static void supabase_registry_task(void *param) {
     char url_buf[180];
 
@@ -163,6 +203,7 @@ static void supabase_registry_task(void *param) {
                 bool sweep = end > idx && body.substring(idx, end).indexOf("true") >= 0;
                 serial_logger_usb_print("sweep_now: ");
                 serial_logger_usb_println(sweep ? "true" : "false");
+                post_drone_dashboard_state();
             }
         } else {
             serial_logger_usb_print("sweep_now poll: ");
