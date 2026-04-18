@@ -75,6 +75,10 @@ uint8_t rc_isconnected(void);
 uint8_t telemetry_send(uint8_t* data, uint16_t datalen);
 void send_peer_info(void);
 void handleClient(void);
+uint8_t rc_backend_force_scan_active(void);
+uint8_t rc_backend_sweep_now_active(void);
+uint8_t rc_backend_sweep_intervals_active(void);
+uint8_t rc_backend_temporary_disable_off_active(void);
 
 // action sequence executor
 void sequence_tick(float dt_sec);

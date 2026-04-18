@@ -55,6 +55,18 @@ extern volatile uint8_t Mode;
 WebServer server(80);
 WebSocketsServer wsServer(82);
 
+namespace {
+constexpr uint32_t kBackendPollIntervalMs       = 2000;
+constexpr float kBackendAutoHoverAltitudeMeters = 0.5f;
+
+struct BackendCommandState {
+    bool sweep_now             = false;
+    bool force_scan            = false;
+    bool sweep_intervals       = false;
+    bool temporary_disable_off = false;
+};
+}  // namespace
+
 // webserver task to handle http requests independently
 static void webserver_task(void *param) {
     for (;;) {
@@ -67,6 +79,127 @@ static void webserver_task(void *param) {
 
 // org_id from drone_org_registry_map, -1 = not yet fetched
 static int8_t g_org_id = -1;
+static volatile uint8_t g_backend_sweep_now = 0;
+static volatile uint8_t g_backend_force_scan = 0;
+static volatile uint8_t g_backend_sweep_intervals = 0;
+static volatile uint8_t g_backend_temporary_disable_off = 0;
+
+static int supabase_get_json(const char *url, String &body) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.begin(client, url);
+    http.addHeader("apikey", SUPABASE_ANON_KEY);
+    http.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
+    http.addHeader("Accept", "application/json");
+    http.setTimeout(5000);
+    int code = http.GET();
+    body     = http.getString();
+    http.end();
+    return code;
+}
+
+static bool json_field_is_true(const String &body, const char *field_name) {
+    String token = String("\"") + field_name + "\":";
+    int idx      = body.indexOf(token);
+    if (idx < 0) return false;
+
+    idx += token.length();
+    while (idx < body.length() && (body[idx] == ' ' || body[idx] == '\t' || body[idx] == '\r' || body[idx] == '\n')) {
+        idx++;
+    }
+
+    return body.substring(idx).startsWith("true");
+}
+
+static void sync_backend_command_state(const BackendCommandState &state) {
+    g_backend_sweep_now             = state.sweep_now ? 1 : 0;
+    g_backend_force_scan            = state.force_scan ? 1 : 0;
+    g_backend_sweep_intervals       = state.sweep_intervals ? 1 : 0;
+    g_backend_temporary_disable_off = state.temporary_disable_off ? 1 : 0;
+}
+
+static void apply_backend_command_state(const BackendCommandState &state) {
+    static bool last_takeoff_request = false;
+    static bool last_disable_request = false;
+
+    const bool takeoff_request = !state.temporary_disable_off && (state.sweep_now || state.force_scan || state.sweep_intervals);
+    const bool disable_request = state.temporary_disable_off;
+
+    if (disable_request && !last_disable_request) {
+        if (Mode == FLIGHT_MODE) {
+            serial_logger_usb_println("backend: temporary_disable_off=true -> auto landing");
+            request_mode_change(AUTO_LANDING_MODE);
+        } else {
+            serial_logger_usb_println("backend: temporary_disable_off=true while not flying");
+        }
+    }
+
+    if (takeoff_request && !last_takeoff_request) {
+        if (Mode == PARKING_MODE) {
+            serial_logger_usb_println("backend: sweep/scan request -> auto takeoff");
+            auto_takeoff_and_hover(kBackendAutoHoverAltitudeMeters);
+        } else if (Mode == FLIGHT_MODE || Mode == AUTO_LANDING_MODE) {
+            serial_logger_usb_println("backend: sweep/scan request ignored because drone is already airborne");
+        } else {
+            serial_logger_usb_println("backend: sweep/scan request ignored because drone is not ready");
+        }
+    }
+
+    last_takeoff_request = takeoff_request;
+    last_disable_request = disable_request;
+}
+
+static bool fetch_backend_command_state_from_table(const char *table_name, const char *select_clause,
+                                                   int8_t org_id, String &body, int &code) {
+    char url_buf[320];
+    snprintf(url_buf, sizeof(url_buf), "https://" SUPABASE_PROJECT_ID ".supabase.co/rest/v1/%s?select=%s&org_id=eq.%d",
+             table_name, select_clause, (int)org_id);
+    code = supabase_get_json(url_buf, body);
+    if (code == 200) {
+        serial_logger_usb_print("backend table: ");
+        serial_logger_usb_println(table_name);
+        return true;
+    }
+    return false;
+}
+
+static bool fetch_backend_command_state(BackendCommandState &state, int8_t org_id, String &body, int &code) {
+    if (fetch_backend_command_state_from_table("org_drone_priority_state",
+                                               "force_scan,sweep_intervals,disable_temporarily", org_id, body, code)) {
+        state.sweep_now             = false;
+        state.force_scan            = json_field_is_true(body, "force_scan");
+        state.sweep_intervals       = json_field_is_true(body, "sweep_intervals");
+        state.temporary_disable_off = json_field_is_true(body, "disable_temporarily");
+        return true;
+    }
+
+    if (fetch_backend_command_state_from_table("sweep_now", "force_scan,sweep_intervals,disable_temporarily", org_id,
+                                               body, code)) {
+        state.sweep_now             = false;
+        state.force_scan            = json_field_is_true(body, "force_scan");
+        state.sweep_intervals       = json_field_is_true(body, "sweep_intervals");
+        state.temporary_disable_off = json_field_is_true(body, "disable_temporarily");
+        return true;
+    }
+
+    if (fetch_backend_command_state_from_table("sweep_now", "sweep_now,force_scan,sweep_intervals,temporary_disable_off",
+                                               org_id, body, code)) {
+        state.sweep_now             = json_field_is_true(body, "sweep_now");
+        state.force_scan            = json_field_is_true(body, "force_scan");
+        state.sweep_intervals       = json_field_is_true(body, "sweep_intervals");
+        state.temporary_disable_off = json_field_is_true(body, "temporary_disable_off");
+        return true;
+    }
+
+    if (!fetch_backend_command_state_from_table("sweep_now", "sweep_now", org_id, body, code)) return false;
+
+    state.sweep_now             = json_field_is_true(body, "sweep_now");
+    state.force_scan            = false;
+    state.sweep_intervals       = false;
+    state.temporary_disable_off = false;
+    return true;
+}
 
 // Post only battery voltage and WiFi RSSI after retrieving data.
 static void post_drone_dashboard_state() {
@@ -174,48 +307,52 @@ static void supabase_registry_task(void *param) {
             continue;
         }
 
-        // poll sweep_now every 2s
-        vTaskDelay(pdMS_TO_TICKS(1000));  // extra 1s to total 2s between polls
+        // poll backend command state every 2s
+        vTaskDelay(pdMS_TO_TICKS(kBackendPollIntervalMs - 1000));
         if (WiFi.status() != WL_CONNECTED) continue;
 
-        snprintf(url_buf, sizeof(url_buf),
-                 "https://" SUPABASE_PROJECT_ID ".supabase.co/rest/v1/sweep_now?select=sweep_now&org_id=eq.%d",
-                 (int)g_org_id);
-
-        WiFiClientSecure client;
-        client.setInsecure();
-        HTTPClient http;
-        http.begin(client, url_buf);
-        http.addHeader("apikey", SUPABASE_ANON_KEY);
-        http.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
-        http.addHeader("Accept", "application/json");
-        http.setTimeout(5000);
-        int code    = http.GET();
-        String body = http.getString();
-        http.end();
-
-        if (code == 200 && body.length() > 0) {
-            int idx = body.indexOf("\"sweep_now\":");
-            if (idx >= 0) {
-                idx += 12;
-                int end = body.indexOf(',', idx);
-                if (end < 0) end = body.indexOf('}', idx);
-                bool sweep = end > idx && body.substring(idx, end).indexOf("true") >= 0;
-                serial_logger_usb_print("sweep_now: ");
-                serial_logger_usb_println(sweep ? "true" : "false");
-                post_drone_dashboard_state();
-            }
+        BackendCommandState state;
+        String body;
+        int code = 0;
+        if (fetch_backend_command_state(state, g_org_id, body, code)) {
+            sync_backend_command_state(state);
+            serial_logger_usb_print("backend flags sweep_now=");
+            serial_logger_usb_print(state.sweep_now ? "true" : "false");
+            serial_logger_usb_print(" force_scan=");
+            serial_logger_usb_print(state.force_scan ? "true" : "false");
+            serial_logger_usb_print(" sweep_intervals=");
+            serial_logger_usb_print(state.sweep_intervals ? "true" : "false");
+            serial_logger_usb_print(" temporary_disable_off=");
+            serial_logger_usb_println(state.temporary_disable_off ? "true" : "false");
+            apply_backend_command_state(state);
+            post_drone_dashboard_state();
         } else {
-            serial_logger_usb_print("sweep_now poll: ");
+            serial_logger_usb_print("backend command poll: ");
             serial_logger_usb_print(String(code).c_str());
             if (body.length() > 0) {
                 serial_logger_usb_print(" ");
                 serial_logger_usb_println(body.c_str());
             } else {
-                serial_logger_usb_println(http.errorToString(code).c_str());
+                serial_logger_usb_println("");
             }
         }
     }
+}
+
+uint8_t rc_backend_force_scan_active(void) {
+    return g_backend_force_scan;
+}
+
+uint8_t rc_backend_sweep_now_active(void) {
+    return g_backend_sweep_now;
+}
+
+uint8_t rc_backend_sweep_intervals_active(void) {
+    return g_backend_sweep_intervals;
+}
+
+uint8_t rc_backend_temporary_disable_off_active(void) {
+    return g_backend_temporary_disable_off;
 }
 
 static WiFiServer cameraServer(81);
