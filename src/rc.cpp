@@ -84,6 +84,18 @@ static volatile uint8_t g_backend_force_scan = 0;
 static volatile uint8_t g_backend_sweep_intervals = 0;
 static volatile uint8_t g_backend_temporary_disable_off = 0;
 
+static int battery_voltage_to_percent(float voltage) {
+    // Clamp the pack reading into a simple dashboard percentage.
+    constexpr float kBatteryEmptyV = 3.30f;
+    constexpr float kBatteryFullV  = 4.20f;
+
+    if (voltage <= kBatteryEmptyV) return 0;
+    if (voltage >= kBatteryFullV) return 100;
+
+    float pct = ((voltage - kBatteryEmptyV) / (kBatteryFullV - kBatteryEmptyV)) * 100.0f;
+    return (int)(pct + 0.5f);
+}
+
 static int supabase_get_json(const char *url, String &body) {
     WiFiClientSecure client;
     client.setInsecure();
@@ -119,6 +131,10 @@ static void sync_backend_command_state(const BackendCommandState &state) {
     g_backend_temporary_disable_off = state.temporary_disable_off ? 1 : 0;
 }
 
+static bool backend_airborne_mode(uint8_t mode) {
+    return mode == FLIGHT_MODE || mode == AUTO_LANDING_MODE || mode == FLIP_MODE;
+}
+
 static void apply_backend_command_state(const BackendCommandState &state) {
     static bool last_takeoff_request = false;
     static bool last_disable_request = false;
@@ -126,23 +142,43 @@ static void apply_backend_command_state(const BackendCommandState &state) {
     const bool takeoff_request = !state.temporary_disable_off && (state.sweep_now || state.force_scan || state.sweep_intervals);
     const bool disable_request = state.temporary_disable_off;
 
-    if (disable_request && !last_disable_request) {
-        if (Mode == FLIGHT_MODE) {
-            serial_logger_usb_println("backend: temporary_disable_off=true -> auto landing");
-            request_mode_change(AUTO_LANDING_MODE);
+    if (disable_request && backend_airborne_mode(Mode) && Mode != AUTO_LANDING_MODE) {
+        if (!last_disable_request) {
+            serial_logger_usb_print("backend: temporary_disable_off=true -> auto landing from mode ");
+            serial_logger_usb_println(String((unsigned int)Mode));
+        }
+        request_mode_change(AUTO_LANDING_MODE);
+    } else if (disable_request && !last_disable_request) {
+        if (Mode == PARKING_MODE) {
+            serial_logger_usb_println("backend: temporary_disable_off=true while already parked");
         } else {
-            serial_logger_usb_println("backend: temporary_disable_off=true while not flying");
+            serial_logger_usb_print("backend: temporary_disable_off=true while mode=");
+            serial_logger_usb_println(String((unsigned int)Mode));
         }
     }
 
-    if (takeoff_request && !last_takeoff_request) {
+    if (disable_request && last_takeoff_request) {
+        serial_logger_usb_println("backend: disable active, clearing pending sweep/scan latch");
+        last_takeoff_request = false;
+    }
+
+    if (disable_request && !last_disable_request && backend_airborne_mode(Mode)) {
+        // keep the disable request dominant over any concurrent scan/takeoff command
+        sequence_stop();
+        PositionHold_flag = 0;
+    }
+
+    if (!disable_request && takeoff_request && !last_takeoff_request) {
         if (Mode == PARKING_MODE) {
             serial_logger_usb_println("backend: sweep/scan request -> auto takeoff");
             auto_takeoff_and_hover(kBackendAutoHoverAltitudeMeters);
-        } else if (Mode == FLIGHT_MODE || Mode == AUTO_LANDING_MODE) {
-            serial_logger_usb_println("backend: sweep/scan request ignored because drone is already airborne");
+        } else if (backend_airborne_mode(Mode)) {
+            serial_logger_usb_print("backend: sweep/scan request ignored because drone is airborne in mode ");
+            serial_logger_usb_println(String((unsigned int)Mode));
         } else {
-            serial_logger_usb_println("backend: sweep/scan request ignored because drone is not ready");
+            serial_logger_usb_print("backend: sweep/scan request ignored because drone is not ready (mode=");
+            serial_logger_usb_print(String((unsigned int)Mode));
+            serial_logger_usb_println(")");
         }
     }
 
@@ -207,13 +243,27 @@ static void post_drone_dashboard_state() {
 
     const char *url = "https://" SUPABASE_PROJECT_ID ".supabase.co/rest/v1/drone_dashboard_state";
     long wifi_rssi  = WiFi.RSSI();
+    char hardware_id[18];
+    snprintf(hardware_id, sizeof(hardware_id), "%02X:%02X:%02X:%02X:%02X:%02X", MyMacAddr[0], MyMacAddr[1],
+             MyMacAddr[2], MyMacAddr[3], MyMacAddr[4], MyMacAddr[5]);
+    const char *status = (Mode == PARKING_MODE) ? "Docked" : "Active";
+    int battery_pct = battery_voltage_to_percent(Voltage);
+    int wifi_pct    = (int)lroundf((float)(wifi_rssi + 100) * (100.0f / 50.0f));
+    if (wifi_pct < 0) wifi_pct = 0;
+    if (wifi_pct > 100) wifi_pct = 100;
     String payload  = "{";
     payload += "\"org_id\":";
     payload += String((int)g_org_id);
-    payload += ",\"battery_voltage\":";
-    payload += String(Voltage, 3);
-    payload += ",\"wifi_rssi\":";
-    payload += String(wifi_rssi);
+    payload += ",\"hardware_id\":\"";
+    payload += hardware_id;
+    payload += "\"";
+    payload += ",\"status\":\"";
+    payload += status;
+    payload += "\"";
+    payload += ",\"battery_level\":";
+    payload += String(battery_pct);
+    payload += ",\"wifi_strength\":";
+    payload += String(wifi_pct);
     payload += "}";
 
     WiFiClientSecure client;
@@ -223,7 +273,7 @@ static void post_drone_dashboard_state() {
     http.addHeader("apikey", SUPABASE_ANON_KEY);
     http.addHeader("Authorization", "Bearer " SUPABASE_ANON_KEY);
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("Prefer", "return=minimal");
+    http.addHeader("Prefer", "resolution=merge-duplicates,return=minimal");
     http.setTimeout(5000);
 
     int post_code = http.POST(payload);
@@ -316,6 +366,8 @@ static void supabase_registry_task(void *param) {
         int code = 0;
         if (fetch_backend_command_state(state, g_org_id, body, code)) {
             sync_backend_command_state(state);
+            serial_logger_usb_print("backend body: ");
+            serial_logger_usb_println(body.c_str());
             serial_logger_usb_print("backend flags sweep_now=");
             serial_logger_usb_print(state.sweep_now ? "true" : "false");
             serial_logger_usb_print(" force_scan=");
