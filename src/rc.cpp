@@ -793,12 +793,12 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *recv_data, int data_len)
     Stick[ALTCONTROLMODE] = recv_data[22];  // 高度制御
 
     ahrs_reset_flag = recv_data[23];
- 
+
     Stick[LOG] = 0.0;
     // if (check_sum!=recv_data[23])USBSerial.printf("checksum=%03d recv_sum=%03d\n\r", check_sum, recv_data[23]);
 
 #if 0
-  USBSerial.printf("%6.3f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f  %6.3f\n\r", 
+  USBSerial.printf("%6.3f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f %6.3f  %6.3f\n\r",
                                             Stick[THROTTLE],
                                             Stick[AILERON],
                                             Stick[ELEVATOR],
@@ -866,15 +866,29 @@ void handle_movement() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     const String dir = server.arg("direction");
 
+    // Validate direction up front.
+    if (dir != "forward" && dir != "backward" && dir != "right" && dir != "left") {
+        server.send(400, "application/json", "{\"success\":false,\"reason\":\"bad_direction\"}");
+        return;
+    }
+
+    // Refuse the move if the drone isn't already airborne. Caller is
+    // responsible for getting the drone hovering first (e.g. via /hover or
+    // a Supabase takeoff command) and retrying until success.
+    if (Mode != FLIGHT_MODE) {
+        server.send(200, "application/json", "{\"success\":false,\"reason\":\"not_in_flight\"}");
+        return;
+    }
+
     if (Position_estimate_valid == 0) {
-        server.send(409, "text/plain", "position estimate unavailable");
+        server.send(200, "application/json", "{\"success\":false,\"reason\":\"no_position_estimate\"}");
         return;
     }
 
     // step size in meters; we default to 0.5 m and clamp if a 'step' arg is provided
     float step = server.hasArg("step") ? server.arg("step").toFloat() : 0.5f;
     if (step <= 0.0f) step = 0.5f;
-    if (step > 2.0f) step = 2.0f;
+    if (step > 8.0f) step = 8.0f;
 
     float old_tx = target_x;
     float old_ty = target_y;
@@ -887,11 +901,8 @@ void handle_movement() {
     } else if (dir == "right") {
         // Y axis is left/right (positive right)
         target_x += step;
-    } else if (dir == "left") {
+    } else /* dir == "left" */ {
         target_x -= step;
-    } else {
-        server.send(400, "text/plain", "bad direction");
-        return;
     }
 
     // Ensure angle control + position hold are active
@@ -903,7 +914,7 @@ void handle_movement() {
     print("MOVE CMD: dir=%s step=%.2f m | target: (%.3f, %.3f) -> (%.3f, %.3f) | current: (%.3f, %.3f)\r\n",
           dir.c_str(), step, old_tx, old_ty, target_x, target_y, current_x, current_y);
 
-    server.send(200, "text/plain", "OK");
+    server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handle_stop() {
@@ -1345,8 +1356,10 @@ void rc_init(void) {
     server.on("/buzz/start", HTTP_GET, startBuzz);
     server.on("/buzz/stop", HTTP_GET, stopBuzz);
     server.on("/land", HTTP_GET, auto_land);
+    server.on("/auto_land", HTTP_GET, auto_land);
     server.on("/hover", HTTP_GET, do_hover);
     server.on("/move", HTTP_GET, handle_movement);
+    server.on("/movement", HTTP_GET, handle_movement);
     server.on("/move/stop", HTTP_GET, handle_stop);
     server.on("/telemetry", HTTP_GET, handle_telemetry);
     server.on("/logs", HTTP_GET, handle_logs);
@@ -1361,8 +1374,10 @@ void rc_init(void) {
     server.on("/buzz/start", HTTP_OPTIONS, handle_options);
     server.on("/buzz/stop", HTTP_OPTIONS, handle_options);
     server.on("/land", HTTP_OPTIONS, handle_options);
+    server.on("/auto_land", HTTP_OPTIONS, handle_options);
     server.on("/hover", HTTP_OPTIONS, handle_options);
     server.on("/move", HTTP_OPTIONS, handle_options);
+    server.on("/movement", HTTP_OPTIONS, handle_options);
     server.on("/move/stop", HTTP_OPTIONS, handle_options);
     server.on("/logs", HTTP_OPTIONS, handle_options);
     server.on("/ping", HTTP_OPTIONS, handle_options);

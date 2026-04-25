@@ -119,10 +119,43 @@ def estimate_person_distance(bbox_h_px: float, frame_h_px: int) -> float:
     return (PERSON_HEIGHT_M * focal_scaled) / bbox_h_px
 
 
+# Retry pacing for the move command. The drone returns success=false until
+# it is airborne and has a valid position estimate, so we keep retrying.
+MOVE_RETRY_INTERVAL_S = 1.0
+MOVE_RETRY_MAX_ATTEMPTS = 120  # ~2 minutes worst-case before giving up
+
+
+def _send_move_once(direction: str, step_m: float) -> tuple[bool, str]:
+    """Send one /movement request. Returns (success, reason)."""
+    try:
+        resp = requests.get(
+            f"{DRONE_API_BASE}/movement",
+            params={"direction": direction, "step": f"{step_m:.3f}"},
+            timeout=5,
+        )
+    except Exception as e:
+        return False, f"request_error:{e}"
+
+    body = resp.text.strip()
+    try:
+        data = resp.json()
+    except Exception:
+        # Drone responded with non-JSON (e.g. older firmware returning "OK").
+        if resp.status_code == 200 and body.lower() in ("ok", "true"):
+            return True, "legacy_ok"
+        return False, f"non_json:{resp.status_code}:{body[:80]}"
+
+    if data.get("success") is True:
+        return True, "ok"
+    return False, str(data.get("reason", f"unknown:{body[:80]}"))
+
+
 def approach_and_land(distance_m: float):
     """Move the drone forward to within 0.5 m of the person, then auto-land.
 
-    Runs in a daemon thread so it never blocks the YOLO stream.
+    Retries the /movement command until the drone confirms it accepted it
+    (i.e. the drone is airborne with a valid position estimate). Runs in a
+    daemon thread so it never blocks the YOLO stream.
     """
     move_dist = distance_m - 0.5
     if move_dist <= 0.0:
@@ -144,15 +177,31 @@ def approach_and_land(distance_m: float):
         f"[YOLO] Approaching person: commanding {move_dist:.2f} m forward "
         f"(estimated distance {distance_m:.2f} m)."
     )
-    try:
-        resp = requests.get(
-            f"{DRONE_API_BASE}/movement",
-            params={"direction": "forward", "step": f"{move_dist:.3f}"},
-            timeout=5,
+
+    # Retry until the drone reports it actually accepted the move.
+    accepted = False
+    for attempt in range(1, MOVE_RETRY_MAX_ATTEMPTS + 1):
+        ok, reason = _send_move_once("forward", move_dist)
+        if ok:
+            print(f"[YOLO] Move accepted on attempt {attempt} ({reason}).")
+            accepted = True
+            break
+
+        print(
+            f"[YOLO] Move attempt {attempt}/{MOVE_RETRY_MAX_ATTEMPTS} "
+            f"rejected ({reason}); retrying in {MOVE_RETRY_INTERVAL_S:.1f}s."
         )
-        print(f"[YOLO] Move command response: {resp.status_code} {resp.text.strip()}")
-    except Exception as e:
-        print(f"[YOLO] Failed to send move command: {e}")
+        time.sleep(MOVE_RETRY_INTERVAL_S)
+
+    if not accepted:
+        print(
+            f"[YOLO] Drone never confirmed the move after "
+            f"{MOVE_RETRY_MAX_ATTEMPTS} attempts; aborting approach."
+        )
+        # Allow a future detection to re-trigger the approach.
+        global _approach_triggered
+        with _approach_lock:
+            _approach_triggered = False
         return
 
     # Wait for the drone to travel — assume ~0.3 m/s with a 3 s buffer.
