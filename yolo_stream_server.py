@@ -96,7 +96,7 @@ PERSON_HEIGHT_M = 1.8288
 CAMERA_FOCAL_LENGTH_PX = float(os.getenv("CAMERA_FOCAL_LENGTH_PX", "515"))
 
 # Drone HTTP API base URL (port 80 web server on the drone).
-_drone_api_host = DRONE_HOST or "10.0.0.1"
+_drone_api_host = DRONE_HOST or "10.135.58.60"
 DRONE_API_BASE = f"http://{_drone_api_host}"
 
 # Approach is triggered only once per server session.
@@ -321,7 +321,7 @@ def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float, boxes
 
                 with _approach_lock:
                     do_approach = not _approach_triggered
-                    
+
                     if do_approach:
                         _approach_triggered = True
 
