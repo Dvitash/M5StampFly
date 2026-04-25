@@ -311,15 +311,20 @@ def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float, boxes
 
         if max_bbox_h > 0:
             dist_m = estimate_person_distance(max_bbox_h, frame_h)
-            if dist_m > 0:
+            # only alert if person >2 meters
+            # less than 2 meters is innacurate
+            if dist_m > 2.0:
                 print(
                     f"[YOLO] Person detected — estimated distance: {dist_m:.2f} m "
                     f"(bbox_h={max_bbox_h:.0f} px, frame_h={frame_h} px)"
                 )
+
                 with _approach_lock:
                     do_approach = not _approach_triggered
+                    
                     if do_approach:
                         _approach_triggered = True
+
                 if do_approach:
                     threading.Thread(
                         target=approach_and_land,
