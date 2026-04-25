@@ -75,7 +75,7 @@ const int RearRight_motor  = 3;
 constexpr bool kMotorSwapFlRrOutputs = false;
 
 // idle floor: escs never see 0% while stabilizing (avoids sync loss; all four spin at least this)
-constexpr float MOTOR_MIN_DUTY = 0.001f;
+constexpr float MOTOR_MIN_DUTY = 0.05f;
 constexpr float MOTOR_MAX_DUTY = 0.98f;
 
 static float clamp_motor_raw_duty(float d) {
@@ -93,7 +93,7 @@ float Control_period = 0.0025f;  // 400Hz
 
 // PID Gain
 // Rate control PID gain (tuned heavier payload: higher kp, slightly lower ti = snappier)
-const float Roll_rate_kp  = 0.95f;
+const float Roll_rate_kp  = 1.3f;
 const float Roll_rate_ti  = 0.55f;
 const float Roll_rate_td  = 0.012f;
 const float Roll_rate_eta = 0.125f;
@@ -135,9 +135,9 @@ const float Hover_trim_scale            = 1.10f;
 const float Payload_hover_boost_duty    = 0.10f;
 const float Thrust0_adapt_gain          = 0.14f;
 const float Thrust0_adapt_margin        = 0.30f;
-const float Altitude_thrust_window_up   = 1.30f;
+const float Altitude_thrust_window_up   = 1.20f;
 const float Altitude_thrust_window_down = 0.80f;
-const float Auto_takeoff_boost_duty     = 0.10f;
+const float Auto_takeoff_boost_duty     = 0.08f;
 
 const float Duty_bias_up   = 1.581f;  // Altitude Control parameter　Itolab 1.589 M5Stack 1.581
 const float Duty_bias_down = 1.578f;  // Auto landing  parameter Itolab 1.578 M5Stack 1.578
@@ -157,11 +157,11 @@ constexpr float MARGIN_OF_ERROR_METERS = 0.0f;  // deadband in meters (~40 px at
 
 const float POS_PIXEL_SCALE         = 0.024f;  // m/px per meter altitude
 const float POS_SCALE_BASE_ALTITUDE = 0.38f;   // fallback altitude if sensor reading invalid
-volatile float Pos_kp_stick         = 0.12f;   // stick units per meter error
-volatile float Pos_ki_stick         = 0.0f;    // stick units per meter-second
-volatile float Pos_kd_stick         = 0.08f;   // stick units per m/s (velocity damping)
-constexpr float POS_CMD_LIMIT       = 0.12f;   // absolute stick limit for position loop
-constexpr float POS_INT_LIMIT       = 0.02f;   // integrator clamp in stick units
+volatile float Pos_kp_stick         = 0.20f;   // stick units per meter error
+volatile float Pos_ki_stick         = 0.03f;   // stick units per meter-second
+volatile float Pos_kd_stick         = 0.12f;   // stick units per m/s (velocity damping)
+constexpr float POS_CMD_LIMIT       = 0.16f;   // absolute stick limit for position loop
+constexpr float POS_INT_LIMIT       = 2.0f;    // integrator clamp in meter-seconds
 
 // Counter
 uint8_t AngleControlCounter                 = 0;
@@ -880,8 +880,10 @@ void reset_rate_control(void) {
     theta_pid.set_error(Pitch_angle_reference);
     Flip_flag          = 0;
     Flip_counter       = 0;
-    Roll_angle_offset  = 0;
-    Pitch_angle_offset = 0;
+    // Capture current tilt so angle controller starts with near-zero error.
+    // Offset decays to 0 once airborne (see angle_control).
+    Roll_angle_offset  = Roll_angle;
+    Pitch_angle_offset = Pitch_angle;
 }
 
 void reset_angle_control(void) {
@@ -899,8 +901,8 @@ void reset_angle_control(void) {
     // 急激な目標値が発生して機体が不安定になるのを防止する
     Aileron_center     = Roll_angle_command;
     Elevator_center    = Pitch_angle_command;
-    Roll_angle_offset  = 0;
-    Pitch_angle_offset = 0;
+    Roll_angle_offset  = Roll_angle;
+    Pitch_angle_offset = Pitch_angle;
     /////////////////////////////////////
 }
 
@@ -926,7 +928,8 @@ static void update_position_hold(float dt_sec) {
     static float prev_roll_cmd  = 0.0f;
     static float prev_pitch_cmd = 0.0f;
 
-    if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0 || Position_estimate_valid == 0) {
+    if (dt_sec <= 0.0f || Mode != FLIGHT_MODE || PositionHold_flag == 0 ||
+        Position_estimate_valid == 0 || Altitude2 < 0.08f) {
         // Don't permanently clear PositionHold_flag — resume when estimate recovers
         pos_i_x        = 0.0f;
         pos_i_y        = 0.0f;
@@ -947,7 +950,7 @@ static void update_position_hold(float dt_sec) {
         return;
     }
 
-    // Vel_x/Vel_y are now computed directly from consecutive UWB updates (rc.cpp).
+    // Vel_x/Vel_y are computed by optical flow integration in sensor.cpp.
     float vel_x = isfinite(Vel_x) ? Vel_x : 0.0f;
     float vel_y = isfinite(Vel_y) ? Vel_y : 0.0f;
     last_x = current_x;
@@ -973,9 +976,9 @@ static void update_position_hold(float dt_sec) {
     float gain_scale_x = clampf(fabsf(err_x) / decel_band, 0.3f, 1.0f);
     float gain_scale_y = clampf(fabsf(err_y) / decel_band, 0.3f, 1.0f);
 
-    // light bleed to keep the integrator from driving oscillations
-    pos_i_x *= 0.95f;
-    pos_i_y *= 0.95f;
+    // Very slow bleed (~9 s half-life at 400 Hz) so ki can cancel persistent CG drift.
+    pos_i_x *= 0.9998f;
+    pos_i_y *= 0.9998f;
 
     float pos_i_x_next = clampf(pos_i_x + err_x * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
     float pos_i_y_next = clampf(pos_i_y + err_y * dt_sec, -POS_INT_LIMIT, POS_INT_LIMIT);
@@ -996,14 +999,9 @@ static void update_position_hold(float dt_sec) {
     if (allow_int_x) pos_i_x = pos_i_x_next;
     if (allow_int_y) pos_i_y = pos_i_y_next;
 
-    bool steady = fabsf(err_x) < 0.02f && fabsf(err_y) < 0.02f && fabsf(vel_x) < 0.05f && fabsf(vel_y) < 0.05f;
-    steady_t    = steady ? (steady_t + dt_sec) : 0.0f;
-    if (steady_t > 0.5f) {
-        pos_i_x = 0.0f;
-        pos_i_y = 0.0f;
-        last_x  = current_x;
-        last_y  = current_y;
-    }
+    // Do not clear the integrator when steady — ki is needed to hold against
+    // persistent CG drift caused by camera weight. The slow bleed above handles wind-down.
+    steady_t = 0.0f;  // unused, kept to avoid refactoring downstream refs
 
     roll_cmd  = clampf(roll_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
     pitch_cmd = clampf(pitch_cmd, -POS_CMD_LIMIT, POS_CMD_LIMIT);
@@ -1061,7 +1059,15 @@ void angle_control(void) {
         }
 
         update_position_hold(Interval_time);
-        uwb_staleness_check();
+
+        // Decay captured launch offsets toward zero once airborne.
+        // At 400 Hz, 0.9990 per tick gives ~1.7 s to halve — fast enough that
+        // a camera-shifted CG is corrected by position hold before the offset fully fades.
+        if (Altitude2 > 0.15f) {
+            constexpr float kOffsetDecay = 0.9990f;
+            Roll_angle_offset  *= kOffsetDecay;
+            Pitch_angle_offset *= kOffsetDecay;
+        }
 
         if (Control_mode == ANGLECONTROL) {
             {

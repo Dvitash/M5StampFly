@@ -85,6 +85,89 @@ print("Loading YOLO model...")
 model = YOLO("yolov8n.pt")
 print("✅ YOLO loaded")
 
+# -------------------- PERSON DISTANCE + APPROACH --------------------
+# Known person height used for distance estimation (6 feet in meters).
+PERSON_HEIGHT_M = 1.8288
+
+# Focal length in pixels for distance estimation.
+# For a typical ESP32-CAM at 480p with ~50° vertical FOV:
+#   focal_px = (frame_height/2) / tan(VFOV/2) ~= 240 / tan(25°) ~= 515
+# Override with CAMERA_FOCAL_LENGTH_PX env var once you have calibrated your camera.
+CAMERA_FOCAL_LENGTH_PX = float(os.getenv("CAMERA_FOCAL_LENGTH_PX", "515"))
+
+# Drone HTTP API base URL (port 80 web server on the drone).
+_drone_api_host = DRONE_HOST or "10.0.0.1"
+DRONE_API_BASE = f"http://{_drone_api_host}"
+
+# Approach is triggered only once per server session.
+_approach_lock = threading.Lock()
+_approach_triggered = False
+
+
+def estimate_person_distance(bbox_h_px: float, frame_h_px: int) -> float:
+    """Estimate distance to a person using the pinhole camera model.
+
+    distance = (known_height_m * focal_length_px) / bbox_height_px
+
+    focal_length_px is scaled to the actual frame height at runtime so the
+    estimate stays consistent regardless of capture resolution.
+    """
+    if bbox_h_px <= 0 or frame_h_px <= 0:
+        return -1.0
+    # Scale the calibration focal length (for 480 px height) to the actual frame.
+    focal_scaled = CAMERA_FOCAL_LENGTH_PX * (frame_h_px / 480.0)
+    return (PERSON_HEIGHT_M * focal_scaled) / bbox_h_px
+
+
+def approach_and_land(distance_m: float):
+    """Move the drone forward to within 0.5 m of the person, then auto-land.
+
+    Runs in a daemon thread so it never blocks the YOLO stream.
+    """
+    move_dist = distance_m - 0.5
+    if move_dist <= 0.0:
+        print(
+            f"[YOLO] Person is already within 0.5 m (est. {distance_m:.2f} m). "
+            "Sending auto-land directly."
+        )
+        try:
+            requests.get(f"{DRONE_API_BASE}/auto_land", timeout=5)
+            print("[YOLO] Auto-land command sent.")
+        except Exception as e:
+            print(f"[YOLO] Failed to send auto-land: {e}")
+        return
+
+    # Safety cap: never command more than 8 m in one move.
+    move_dist = min(move_dist, 8.0)
+
+    print(
+        f"[YOLO] Approaching person: commanding {move_dist:.2f} m forward "
+        f"(estimated distance {distance_m:.2f} m)."
+    )
+    try:
+        resp = requests.get(
+            f"{DRONE_API_BASE}/movement",
+            params={"direction": "forward", "step": f"{move_dist:.3f}"},
+            timeout=5,
+        )
+        print(f"[YOLO] Move command response: {resp.status_code} {resp.text.strip()}")
+    except Exception as e:
+        print(f"[YOLO] Failed to send move command: {e}")
+        return
+
+    # Wait for the drone to travel — assume ~0.3 m/s with a 3 s buffer.
+    travel_time = (move_dist / 0.3) + 3.0
+    print(f"[YOLO] Waiting {travel_time:.1f} s for drone to reach target...")
+    time.sleep(travel_time)
+
+    print("[YOLO] Sending auto-land command.")
+    try:
+        resp = requests.get(f"{DRONE_API_BASE}/auto_land", timeout=5)
+        print(f"[YOLO] Auto-land response: {resp.status_code} {resp.text.strip()}")
+    except Exception as e:
+        print(f"[YOLO] Failed to send auto-land: {e}")
+
+
 # -------------------- AUDIO --------------------
 last_announce_time = 0.0
 
@@ -203,15 +286,46 @@ def insert_activity_feed(
             return False
 
 
-def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float):
+def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float, boxes=None):
     """
-    Handles audio + storage upload + DB alert on detection cooldown.
+    Handles distance estimation, audio + storage upload + DB alert on detection cooldown.
     Uploads the full frame, not a crop.
     """
-    global last_announce_time, last_db_insert_time
+    global last_announce_time, last_db_insert_time, _approach_triggered
 
     if num_boxes <= 0:
         return
+
+    # ---- Distance estimation & approach ----
+    if boxes is not None and len(boxes) > 0:
+        frame_h = frame.shape[0]
+        max_bbox_h = 0.0
+        try:
+            xyxy = boxes.xyxy.cpu().numpy()
+            for box in xyxy:
+                h = float(box[3] - box[1])
+                if h > max_bbox_h:
+                    max_bbox_h = h
+        except Exception as e:
+            print(f"[YOLO] Box parsing error: {e}")
+
+        if max_bbox_h > 0:
+            dist_m = estimate_person_distance(max_bbox_h, frame_h)
+            if dist_m > 0:
+                print(
+                    f"[YOLO] Person detected — estimated distance: {dist_m:.2f} m "
+                    f"(bbox_h={max_bbox_h:.0f} px, frame_h={frame_h} px)"
+                )
+                with _approach_lock:
+                    do_approach = not _approach_triggered
+                    if do_approach:
+                        _approach_triggered = True
+                if do_approach:
+                    threading.Thread(
+                        target=approach_and_land,
+                        args=(dist_m,),
+                        daemon=True,
+                    ).start()
 
     # voice
     if (now - last_announce_time) >= ANNOUNCE_COOLDOWN:
@@ -278,6 +392,7 @@ def mjpeg_generator():
             frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             if frame is None:
                 continue
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
 
             now = time.monotonic()
             should_run_yolo = (now - last_infer) >= MIN_INTERVAL
@@ -290,7 +405,7 @@ def mjpeg_generator():
 
                     # Run alert logic on ORIGINAL frame
                     if num_boxes > 0:
-                        handle_person_detection(frame, num_boxes, now)
+                        handle_person_detection(frame, num_boxes, now, boxes=results[0].boxes)
 
                     # draw boxes for stream output
                     frame = results[0].plot()
@@ -359,6 +474,7 @@ def mjpeg_generator():
                         frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
                         if frame is None:
                             continue
+                        frame = cv2.rotate(frame, cv2.ROTATE_180)
 
                         now = time.monotonic()
                         should_run_yolo = (now - last_infer) >= MIN_INTERVAL
@@ -371,7 +487,7 @@ def mjpeg_generator():
 
                                 # Run alert logic on ORIGINAL frame
                                 if num_boxes > 0:
-                                    handle_person_detection(frame, num_boxes, now)
+                                    handle_person_detection(frame, num_boxes, now, boxes=results[0].boxes)
 
                                 # draw boxes for stream output
                                 frame = results[0].plot()
@@ -449,7 +565,6 @@ def upload_frame():
             elapsed = now - _upload_window_start
             if elapsed >= 1.0:
                 _upload_fps = _upload_count / elapsed
-                print(f"[YOLO] upload FPS: {_upload_fps:.1f}")
                 _upload_count = 0
                 _upload_window_start = now
 
@@ -512,6 +627,10 @@ def status():
 
 
 if __name__ == "__main__":
+    # Silence Werkzeug's per-request access log (POST /upload spam)
+    import logging
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
     bind_host = os.environ.get("YOLO_BIND_HOST", "0.0.0.0")
     bind_port = int(os.environ.get("YOLO_PORT", "5000"))
     print(f"[YOLO] Starting server on {bind_host}:{bind_port}")

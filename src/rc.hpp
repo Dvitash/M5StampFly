@@ -83,7 +83,6 @@ uint8_t rc_backend_temporary_disable_off_active(void);
 // action sequence executor
 void sequence_tick(float dt_sec);
 void sequence_stop(void);
-void uwb_staleness_check(void);
 
 extern volatile float Stick[16];
 extern volatile uint8_t Rc_err_flag;

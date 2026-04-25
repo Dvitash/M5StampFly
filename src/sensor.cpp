@@ -267,7 +267,8 @@ float sensor_read(void) {
         vel_y_filter.reset();
         Vel_x = 0.0f;
         Vel_y = 0.0f;
-        // Position_estimate_valid is owned by UWB (rc.cpp) — do not reset here.
+        Position_estimate_valid = 0;
+        opt_interval = 0.0f;
 
         acc_filter.reset();
     }
@@ -356,6 +357,37 @@ float sensor_read(void) {
         Az_bias      = EstimatedAltitude.Bias;
         // USBSerial.printf("Sens=%f Az=%f Altitude=%f Velocity=%f Bias=%f\n\r",Altitude, Az, Altitude2, Alt_velocity,
         // Az_bias);
+    }
+
+    // Optical flow position update
+    if (g_flow_initialized && opt_interval >= 0.01f) {
+        bool gotMotion = false;
+        uint8_t squal  = 0;
+        float dt_s     = opt_interval;
+        opt_interval   = 0.0f;
+        flow.readMotion(deltaX, deltaY, gotMotion, squal);
+        if (gotMotion && squal > 30 && Altitude2 > 0.05f && Altitude2 < 2.5f && Mode == FLIGHT_MODE) {
+            // Convert pixel deltas to body-frame velocity:
+            // vel [m/s] = delta_pixel * altitude_m * kFlowScale / dt_s
+            // kFlowScale ≈ rad/pixel for PMW3901 (tune if drift is consistent)
+            const float kFlowScale = 0.01f;
+            float raw_vx = (float)(-deltaY) * kFlowScale * Altitude2 / dt_s;
+            float raw_vy = (float)(-deltaX) * kFlowScale * Altitude2 / dt_s;
+            // Rotate body frame to world frame using yaw angle
+            float cy       = cosf(Yaw_angle);
+            float sy       = sinf(Yaw_angle);
+            float world_vx = cy * raw_vx - sy * raw_vy;
+            float world_vy = sy * raw_vx + cy * raw_vy;
+            Vel_x             = vel_x_filter.update(world_vx, dt_s);
+            Vel_y             = vel_y_filter.update(world_vy, dt_s);
+            current_x        += Vel_x * dt_s;
+            current_y        += Vel_y * dt_s;
+            Position_estimate_valid = 1;
+        } else if (Altitude2 <= 0.05f || !gotMotion || squal <= 30) {
+            Vel_x = 0.0f;
+            Vel_y = 0.0f;
+            Position_estimate_valid = 0;
+        }
     }
 
     // Accel fail safe
