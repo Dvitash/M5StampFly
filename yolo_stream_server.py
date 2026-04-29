@@ -7,12 +7,18 @@ load_dotenv()
 import os
 import time
 import uuid
+import socket
 import threading
+import concurrent.futures
 
 import cv2
 import numpy as np
 import requests
-import pyttsx3
+try:
+    import pyttsx3
+    _PYTTSX3_AVAILABLE = True
+except Exception:
+    _PYTTSX3_AVAILABLE = False
 from flask import Flask, Response, request
 from supabase import create_client, Client
 from ultralytics import YOLO
@@ -23,11 +29,11 @@ from ultralytics import YOLO
 DRONE_HOST = os.getenv("DRONE_HOST", "").strip()
 CAM_URL = os.getenv("DRONE_CAMERA_URL", "").strip()
 if not CAM_URL:
-    # Fallbacks:
-    # - If you set DRONE_HOST to the drone's QU-Device IP (e.g. 10.135.58.60), this will work.
-    # - If DRONE_HOST is unset, we default to the old "drone AP" IP.
-    host = DRONE_HOST or "10.0.0.1"
-    CAM_URL = f"http://192.168.4.1/api/v1/stream"
+    # Connect directly to the drone's own AP.
+    # If DRONE_HOST is set to a direct drone IP (e.g. 192.168.4.1), use it;
+    # otherwise fall back to the standard drone AP address.
+    host = DRONE_HOST or "192.168.4.1"
+    CAM_URL = f"http://{host}/api/v1/stream"
 
 TARGET_FPS = 3.0
 MIN_INTERVAL = 1.0 / TARGET_FPS
@@ -47,6 +53,7 @@ DEFAULT_ORG_ID_STR = os.getenv("DEFAULT_ORG_ID", "").strip()
 # Storage settings
 DETECTION_IMAGE_BUCKET = "photos"
 ACTIVITY_FEED_TABLE = os.getenv("ACTIVITY_FEED_TABLE", "activity_feed").strip()
+BACKEND_COMMAND_TABLE = os.getenv("BACKEND_COMMAND_TABLE", "org_drone_priority_state").strip()
 
 # These should match your DB columns if you want the URL/path saved in the row.
 ACTIVITY_FEED_IMAGE_URL_COLUMN = os.getenv("ACTIVITY_FEED_IMAGE_URL_COLUMN", "image_url").strip()
@@ -95,13 +102,62 @@ PERSON_HEIGHT_M = 1.8288
 # Override with CAMERA_FOCAL_LENGTH_PX env var once you have calibrated your camera.
 CAMERA_FOCAL_LENGTH_PX = float(os.getenv("CAMERA_FOCAL_LENGTH_PX", "515"))
 
-# Drone HTTP API base URL (port 80 web server on the drone).
-_drone_api_host = DRONE_HOST or "10.135.58.60"
-DRONE_API_BASE = f"http://{_drone_api_host}"
+# ---- Drone IP discovery ----
+def _ping_ip(ip: str) -> str | None:
+    try:
+        r = requests.get(f"http://{ip}/ping", timeout=0.5)
+        if r.status_code == 200 and "pong" in r.text.lower():
+            return ip
+    except Exception:
+        pass
+    return None
+
+def _find_drone_ip() -> str | None:
+    # 1. Try known IPs first (fast, 1.5s timeout each)
+    for ip in ([DRONE_HOST] if DRONE_HOST else []) + ["192.168.4.1"]:
+        if not ip:
+            continue
+        try:
+            r = requests.get(f"http://{ip}/ping", timeout=1.5)
+            if r.status_code == 200 and "pong" in r.text.lower():
+                print(f"[drone] Found drone at {ip}")
+                return ip
+        except Exception:
+            pass
+
+    # 2. Scan local subnets in parallel
+    try:
+        local_ip = socket.gethostbyname(socket.gethostname())
+        own_subnet = ".".join(local_ip.split(".")[:3])
+    except Exception:
+        own_subnet = "10.135.58"
+
+    subnets = list(dict.fromkeys([own_subnet, "10.135.58", "10.135.55", "10.135.57"]))
+    all_ips = [f"{s}.{i}" for s in subnets for i in range(1, 255)]
+    print(f"[drone] Scanning {len(all_ips)} IPs for drone (this takes ~5s)...")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=80) as ex:
+        futs = {ex.submit(_ping_ip, ip): ip for ip in all_ips}
+        for fut in concurrent.futures.as_completed(futs):
+            result = fut.result()
+            if result:
+                print(f"[drone] Found drone at {result} (scan)")
+                for f in futs:
+                    f.cancel()
+                return result
+
+    print("[drone] WARNING: no drone found — will retry on detection")
+    return None
+
+_drone_ip: str | None = _find_drone_ip()
+DRONE_API_BASE = f"http://{_drone_ip}" if _drone_ip else ""
+print(f"[drone] API base: {DRONE_API_BASE or '(unknown — will scan on detection)'}")
 
 # Approach is triggered only once per server session.
 _approach_lock = threading.Lock()
 _approach_triggered = False
+_consecutive_detection_count = 0
+_last_approach_distance_m = 0.0
 
 
 def estimate_person_distance(bbox_h_px: float, frame_h_px: int) -> float:
@@ -119,10 +175,16 @@ def estimate_person_distance(bbox_h_px: float, frame_h_px: int) -> float:
     return (PERSON_HEIGHT_M * focal_scaled) / bbox_h_px
 
 
-# Retry pacing for the move command. The drone returns success=false until
-# it is airborne and has a valid position estimate, so we keep retrying.
+# Retry pacing for the move command.
 MOVE_RETRY_INTERVAL_S = 1.0
-MOVE_RETRY_MAX_ATTEMPTS = 120  # ~2 minutes worst-case before giving up
+MOVE_RETRY_MAX_ATTEMPTS = 30  # up to 30 s waiting for flow_valid after airborne
+
+FIXED_APPROACH_DISTANCE_M = float(os.getenv("FIXED_APPROACH_DISTANCE_M", "2.5"))
+
+# How long to wait for the drone to reach FLIGHT_MODE after /hover (s).
+TAKEOFF_TIMEOUT_S = float(os.getenv("TAKEOFF_TIMEOUT_S", "20.0"))
+# Target hover altitude for takeoff (m).
+HOVER_ALTITUDE_M = float(os.getenv("HOVER_ALTITUDE", "0.5"))
 
 
 def _send_move_once(direction: str, step_m: float) -> tuple[bool, str]:
@@ -150,71 +212,108 @@ def _send_move_once(direction: str, step_m: float) -> tuple[bool, str]:
     return False, str(data.get("reason", f"unknown:{body[:80]}"))
 
 
+def _telemetry() -> dict | None:
+    """Fetch /telemetry from the drone; return parsed dict or None."""
+    try:
+        r = requests.get(f"{DRONE_API_BASE}/telemetry", timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def request_hover_via_backend() -> bool:
+    """Set the backend flag the drone firmware already polls for auto-takeoff."""
+    if supabase is None or DEFAULT_ORG_ID is None:
+        return False
+
+    payload = {
+        "org_id": DEFAULT_ORG_ID,
+        "force_scan": True,
+        "sweep_intervals": False,
+        "disable_temporarily": False,
+    }
+
+    try:
+        supabase.table(BACKEND_COMMAND_TABLE).upsert(payload).execute()
+        print(f"[YOLO] Backend hover request queued: {payload}")
+        return True
+    except Exception as e:
+        print(f"[YOLO] Failed to queue backend hover request: {e}")
+        return False
+
+
 def approach_and_land(distance_m: float):
-    """Move the drone forward to within 0.5 m of the person, then auto-land.
+    """Call /fly directly on the drone — takes off, moves forward, lands."""
+    global _approach_triggered, _drone_ip, DRONE_API_BASE
 
-    Retries the /movement command until the drone confirms it accepted it
-    (i.e. the drone is airborne with a valid position estimate). Runs in a
-    daemon thread so it never blocks the YOLO stream.
-    """
-    move_dist = distance_m - 0.5
-    if move_dist <= 0.0:
-        print(
-            f"[YOLO] Person is already within 0.5 m (est. {distance_m:.2f} m). "
-            "Sending auto-land directly."
-        )
-        try:
-            requests.get(f"{DRONE_API_BASE}/auto_land", timeout=5)
-            print("[YOLO] Auto-land command sent.")
-        except Exception as e:
-            print(f"[YOLO] Failed to send auto-land: {e}")
-        return
+    capped_m = min(distance_m, 4.0)
 
-    # Safety cap: never command more than 8 m in one move.
-    move_dist = min(move_dist, 8.0)
+    # Re-scan if we don't have a working IP yet
+    if not _drone_ip:
+        print("[YOLO] Drone IP unknown — scanning now...")
+        _drone_ip = _find_drone_ip()
+        DRONE_API_BASE = f"http://{_drone_ip}" if _drone_ip else ""
 
-    print(
-        f"[YOLO] Approaching person: commanding {move_dist:.2f} m forward "
-        f"(estimated distance {distance_m:.2f} m)."
-    )
-
-    # Retry until the drone reports it actually accepted the move.
-    accepted = False
-    for attempt in range(1, MOVE_RETRY_MAX_ATTEMPTS + 1):
-        ok, reason = _send_move_once("forward", move_dist)
-        if ok:
-            print(f"[YOLO] Move accepted on attempt {attempt} ({reason}).")
-            accepted = True
-            break
-
-        print(
-            f"[YOLO] Move attempt {attempt}/{MOVE_RETRY_MAX_ATTEMPTS} "
-            f"rejected ({reason}); retrying in {MOVE_RETRY_INTERVAL_S:.1f}s."
-        )
-        time.sleep(MOVE_RETRY_INTERVAL_S)
-
-    if not accepted:
-        print(
-            f"[YOLO] Drone never confirmed the move after "
-            f"{MOVE_RETRY_MAX_ATTEMPTS} attempts; aborting approach."
-        )
-        # Allow a future detection to re-trigger the approach.
-        global _approach_triggered
+    if not _drone_ip:
+        print("[YOLO] Still no drone IP — cannot fly. Releasing latch.")
         with _approach_lock:
             _approach_triggered = False
         return
 
-    # Wait for the drone to travel — assume ~0.3 m/s with a 3 s buffer.
-    travel_time = (move_dist / 0.3) + 3.0
-    print(f"[YOLO] Waiting {travel_time:.1f} s for drone to reach target...")
-    time.sleep(travel_time)
+    print(f"[YOLO] Calling http://{_drone_ip}/fly?distance={capped_m:.3f}")
 
-    print("[YOLO] Sending auto-land command.")
-    try:
-        resp = requests.get(f"{DRONE_API_BASE}/auto_land", timeout=5)
-        print(f"[YOLO] Auto-land response: {resp.status_code} {resp.text.strip()}")
-    except Exception as e:
-        print(f"[YOLO] Failed to send auto-land: {e}")
+    success = False
+    for attempt in range(4):
+        try:
+            r = requests.get(
+                f"http://{_drone_ip}/fly",
+                params={"distance": f"{capped_m:.3f}"},
+                timeout=3,
+            )
+            if r.status_code == 200:
+                print(f"[YOLO] /fly OK — drone taking off!")
+                success = True
+                break
+            else:
+                print(f"[YOLO] /fly attempt {attempt+1}: HTTP {r.status_code} {r.text[:60]}")
+        except Exception as e:
+            print(f"[YOLO] /fly attempt {attempt+1} failed on {_drone_ip}: {e}")
+            # Try re-scanning for a fresh IP
+            new_ip = _find_drone_ip()
+            if new_ip and new_ip != _drone_ip:
+                _drone_ip = new_ip
+                DRONE_API_BASE = f"http://{_drone_ip}"
+                print(f"[YOLO] Retrying with new IP {_drone_ip}")
+        time.sleep(0.5)
+
+    if not success:
+        print(f"[YOLO] /fly failed on {_drone_ip} — releasing latch.")
+        with _approach_lock:
+            _approach_triggered = False
+        return
+
+    # Also insert Supabase record as backup / logging
+    if supabase and DEFAULT_ORG_ID:
+        try:
+            occurred_at_iso = time.strftime("%Y-%m-%dT%H:%M:%S.", time.gmtime()) + f"{int(time.time()*1000)%1000:03d}Z"
+            supabase.table(ACTIVITY_FEED_TABLE).insert({
+                "title": f"CMD_APPROACH_AND_LAND {capped_m:.3f}",
+                "occurred_at": occurred_at_iso,
+                "org_id": DEFAULT_ORG_ID,
+            }).execute()
+        except Exception:
+            pass
+
+    move_time_s = capped_m / 0.45
+    hold_s = 3.0 + 2.0 + move_time_s + 5.0
+    print(f"[YOLO] Holding latch {hold_s:.0f}s while drone runs sequence...")
+    time.sleep(hold_s)
+
+    with _approach_lock:
+        _approach_triggered = False
+    print("[YOLO] Latch released — ready for next detection.")
 
 
 # -------------------- AUDIO --------------------
@@ -222,6 +321,9 @@ last_announce_time = 0.0
 
 
 def speak_person_detected():
+    if not _PYTTSX3_AVAILABLE:
+        return
+
     def _worker():
         try:
             engine = pyttsx3.init()
@@ -341,8 +443,10 @@ def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float, boxes
     Uploads the full frame, not a crop.
     """
     global last_announce_time, last_db_insert_time, _approach_triggered
+    global _consecutive_detection_count, _last_approach_distance_m
 
     if num_boxes <= 0:
+        _consecutive_detection_count = 0
         return
 
     # ---- Distance estimation & approach ----
@@ -360,26 +464,34 @@ def handle_person_detection(frame: np.ndarray, num_boxes: int, now: float, boxes
 
         if max_bbox_h > 0:
             dist_m = estimate_person_distance(max_bbox_h, frame_h)
-            # only alert if person >2 meters
-            # less than 2 meters is innacurate
-            if dist_m > 2.0:
+            # only trigger if person is detectable range (>2 m, sensor inaccurate below that)
+            if dist_m > 0.3:
+                _consecutive_detection_count += 1
+                _last_approach_distance_m = dist_m
                 print(
-                    f"[YOLO] Person detected — estimated distance: {dist_m:.2f} m "
+                    f"[YOLO] Person detected ({_consecutive_detection_count}/2) — "
+                    f"estimated distance: {dist_m:.2f} m "
                     f"(bbox_h={max_bbox_h:.0f} px, frame_h={frame_h} px)"
                 )
 
-                with _approach_lock:
-                    do_approach = not _approach_triggered
+                # Require 2 consecutive frames before triggering approach
+                if _consecutive_detection_count >= 2:
+                    with _approach_lock:
+                        do_approach = not _approach_triggered
+                        if do_approach:
+                            _approach_triggered = True
 
                     if do_approach:
-                        _approach_triggered = True
-
-                if do_approach:
-                    threading.Thread(
-                        target=approach_and_land,
-                        args=(dist_m,),
-                        daemon=True,
-                    ).start()
+                        _consecutive_detection_count = 0
+                        threading.Thread(
+                            target=approach_and_land,
+                            args=(_last_approach_distance_m,),
+                            daemon=True,
+                        ).start()
+            else:
+                _consecutive_detection_count = 0
+        else:
+            _consecutive_detection_count = 0
 
     # voice
     if (now - last_announce_time) >= ANNOUNCE_COOLDOWN:
@@ -426,150 +538,57 @@ def mjpeg_generator():
     last_yolo_frame_ts = 0.0
 
     while True:
-        if UPLOAD_MODE:
-            with _latest_frame_lock:
-                jpeg_data = _latest_frame_jpeg
-                frame_ts = _latest_frame_ts
+        # Always serve from the shared frame buffer (populated by upload or pull worker)
+        with _latest_frame_lock:
+            jpeg_data = _latest_frame_jpeg
+            frame_ts = _latest_frame_ts
 
-            if jpeg_data is None:
-                time.sleep(0.05)
-                continue
+        if jpeg_data is None:
+            time.sleep(0.05)
+            continue
 
-            # Don't re-process the same frame multiple times
-            if frame_ts <= last_yolo_frame_ts:
-                time.sleep(0.01)
-                continue
+        # Don't re-process the same frame multiple times
+        if frame_ts <= last_yolo_frame_ts:
+            time.sleep(0.01)
+            continue
 
-            last_yolo_frame_ts = frame_ts
+        last_yolo_frame_ts = frame_ts
 
-            img_array = np.frombuffer(jpeg_data, dtype=np.uint8)
-            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        img_array = np.frombuffer(jpeg_data, dtype=np.uint8)
+        frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if frame is None:
+            continue
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
 
-            now = time.monotonic()
-            should_run_yolo = (now - last_infer) >= MIN_INTERVAL
+        now = time.monotonic()
+        should_run_yolo = (now - last_infer) >= MIN_INTERVAL
 
-            if should_run_yolo:
-                last_infer = now
-                try:
-                    results = model(frame, classes=[0], verbose=False)
-                    num_boxes = len(results[0].boxes)
+        if should_run_yolo:
+            last_infer = now
+            try:
+                results = model(frame, classes=[0], verbose=False)
+                num_boxes = len(results[0].boxes)
 
-                    # Run alert logic on ORIGINAL frame
-                    if num_boxes > 0:
-                        handle_person_detection(frame, num_boxes, now, boxes=results[0].boxes)
+                # Run alert logic on ORIGINAL frame
+                if num_boxes > 0:
+                    handle_person_detection(frame, num_boxes, now, boxes=results[0].boxes)
 
-                    # draw boxes for stream output
-                    frame = results[0].plot()
+                # draw boxes for stream output
+                frame = results[0].plot()
 
-                except Exception as e:
-                    print("[YOLO] YOLO processing error:", e)
+            except Exception as e:
+                print("[YOLO] YOLO processing error:", e)
 
-            ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not ok:
-                continue
+        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            continue
 
-            yield (
-                b"--frame\r\n"
+        yield (
+            b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n"
                 + jpeg.tobytes()
                 + b"\r\n"
             )
-
-        else:
-            try:
-                print(f"[YOLO] Connecting to camera: {CAM_URL}")
-                r = requests.get(CAM_URL, stream=True, timeout=10)
-                if r.status_code != 200:
-                    print(f"[YOLO] HTTP error from camera: {r.status_code}")
-                    time.sleep(1)
-                    continue
-
-                print("[YOLO] Camera HTTP connected, streaming...")
-                bytes_buf = b""
-                last_frame_time = time.monotonic()
-
-                for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
-                    if not chunk:
-                        continue
-
-                    # prevent runaway buffer
-                    if len(bytes_buf) > MAX_BUFFER_SIZE:
-                        jpeg_start = bytes_buf.find(b"\xff\xd8")
-                        bytes_buf = bytes_buf[jpeg_start:] if jpeg_start != -1 else b""
-                        last_frame_time = time.monotonic()
-
-                    bytes_buf += chunk
-                    now_mono = time.monotonic()
-
-                    # frame timeout
-                    if now_mono - last_frame_time > FRAME_TIMEOUT:
-                        jpeg_start = bytes_buf.find(b"\xff\xd8")
-                        bytes_buf = bytes_buf[jpeg_start:] if jpeg_start != -1 else b""
-                        last_frame_time = now_mono
-                        continue
-
-                    # extract all complete JPGs inside buffer
-                    while True:
-                        a = bytes_buf.find(b"\xff\xd8")
-                        if a == -1:
-                            break
-                        b = bytes_buf.find(b"\xff\xd9", a + 2)
-                        if b == -1:
-                            break
-
-                        jpg = bytes_buf[a:b + 2]
-                        bytes_buf = bytes_buf[b + 2:]
-                        last_frame_time = now_mono
-
-                        img_array = np.frombuffer(jpg, dtype=np.uint8)
-                        frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                        if frame is None:
-                            continue
-                        frame = cv2.rotate(frame, cv2.ROTATE_180)
-
-                        now = time.monotonic()
-                        should_run_yolo = (now - last_infer) >= MIN_INTERVAL
-
-                        if should_run_yolo:
-                            last_infer = now
-                            try:
-                                results = model(frame, classes=[0], verbose=False)
-                                num_boxes = len(results[0].boxes)
-
-                                # Run alert logic on ORIGINAL frame
-                                if num_boxes > 0:
-                                    handle_person_detection(frame, num_boxes, now, boxes=results[0].boxes)
-
-                                # draw boxes for stream output
-                                frame = results[0].plot()
-
-                            except Exception as e:
-                                print("[YOLO] YOLO processing error:", e)
-
-                        ok, jpeg = cv2.imencode(
-                            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
-                        )
-                        if not ok:
-                            continue
-
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n"
-                            + jpeg.tobytes()
-                            + b"\r\n"
-                        )
-
-                print("[YOLO] Camera stream ended, reconnecting...")
-
-            except requests.RequestException as e:
-                print(f"[YOLO] Network error, reconnecting in 1s: {e}")
-                time.sleep(1)
-            except Exception as e:
-                print(f"[YOLO] Unexpected error, reconnecting in 1s: {e}")
-                time.sleep(1)
 
 
 @app.route("/yolo_stream")
@@ -655,6 +674,23 @@ def test_alert():
     return ("insert ok" if ok else "insert failed"), (200 if ok else 500)
 
 
+@app.route("/trigger")
+@app.route("/trigger/<float:distance_m>")
+def manual_trigger(distance_m: float = 2.5):
+    """Manually trigger the approach-and-land sequence.
+    Example: http://localhost:5000/trigger        (uses 2.5 m)
+             http://localhost:5000/trigger/3.0    (uses 3.0 m)
+    """
+    global _approach_triggered
+    with _approach_lock:
+        if _approach_triggered:
+            return "approach already in progress — wait for it to finish", 409
+        _approach_triggered = True
+
+    threading.Thread(target=approach_and_land, args=(distance_m,), daemon=True).start()
+    return f"approach triggered: {distance_m:.2f} m — watch serial monitor", 200
+
+
 @app.route("/ping")
 def ping():
     return "ok"
@@ -680,10 +716,114 @@ def status():
     }
 
 
+# -------------------- BACKGROUND DETECTION WORKER --------------------
+
+def _detection_worker():
+    """Continuously run YOLO on the latest uploaded frame.
+
+    Runs in a daemon thread started at server launch so detection always
+    happens regardless of whether anyone is watching the /yolo_stream.
+    """
+    last_processed_ts = 0.0
+    last_infer = 0.0
+    last_frame_warn = 0.0   # rate-limit the "no frames" warning
+
+    while True:
+        with _latest_frame_lock:
+            jpeg_data = _latest_frame_jpeg
+            frame_ts = _latest_frame_ts
+
+        # No frame yet, or same frame as last time
+        if jpeg_data is None or frame_ts <= last_processed_ts:
+            now = time.monotonic()
+            if (now - last_frame_warn) >= 10.0:
+                last_frame_warn = now
+                print(f"[YOLO] Waiting for camera frames from {CAM_URL} ...")
+            time.sleep(0.05)
+            continue
+
+        now = time.monotonic()
+        if (now - last_infer) < MIN_INTERVAL:
+            time.sleep(0.02)
+            continue
+
+        last_infer = now
+        last_processed_ts = frame_ts
+
+        img_array = np.frombuffer(jpeg_data, dtype=np.uint8)
+        frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if frame is None:
+            continue
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
+
+        try:
+            results = model(frame, classes=[0], verbose=False)
+            num_boxes = len(results[0].boxes)
+            if num_boxes > 0:
+                handle_person_detection(frame, num_boxes, now, boxes=results[0].boxes)
+        except Exception as e:
+            print("[YOLO] Detection worker error:", e)
+
+
+def _pull_camera_worker():
+    """Pull MJPEG frames from CAM_URL and store as latest frame for the detection worker."""
+    global _latest_frame_jpeg, _latest_frame_ts
+
+    while True:
+        try:
+            print(f"[CAM] Connecting to {CAM_URL} ...")
+            r = requests.get(CAM_URL, stream=True, timeout=10)
+            if r.status_code != 200:
+                print(f"[CAM] HTTP {r.status_code} from camera, retrying in 3s")
+                time.sleep(3)
+                continue
+
+            print("[CAM] Connected — pulling frames for detection.")
+            buf = b""
+            for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                if not chunk:
+                    continue
+                if len(buf) > MAX_BUFFER_SIZE:
+                    s = buf.find(b"\xff\xd8")
+                    buf = buf[s:] if s != -1 else b""
+                buf += chunk
+                while True:
+                    a = buf.find(b"\xff\xd8")
+                    if a == -1:
+                        break
+                    b = buf.find(b"\xff\xd9", a + 2)
+                    if b == -1:
+                        break
+                    jpg = buf[a:b + 2]
+                    buf = buf[b + 2:]
+                    with _latest_frame_lock:
+                        _latest_frame_jpeg = jpg
+                        _latest_frame_ts = time.monotonic()
+            print("[CAM] Stream ended, reconnecting in 2s...")
+            time.sleep(2)
+
+        except Exception as e:
+            print(f"[CAM] Error: {e} — retrying in 3s")
+            time.sleep(3)
+
+
 if __name__ == "__main__":
     # Silence Werkzeug's per-request access log (POST /upload spam)
     import logging
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    # Detection worker always runs, regardless of UPLOAD_MODE
+    t = threading.Thread(target=_detection_worker, daemon=True)
+    t.start()
+    print("[YOLO] Background detection worker started.")
+
+    # In pull mode, also start a thread that continuously pulls from the camera
+    if not UPLOAD_MODE:
+        tc = threading.Thread(target=_pull_camera_worker, daemon=True)
+        tc.start()
+        print(f"[YOLO] Camera pull worker started → {CAM_URL}")
+    else:
+        print(f"[YOLO] Upload mode ON — waiting for camera to POST frames to /upload")
 
     bind_host = os.environ.get("YOLO_BIND_HOST", "0.0.0.0")
     bind_port = int(os.environ.get("YOLO_PORT", "5000"))

@@ -54,8 +54,13 @@ extern volatile uint8_t Mode;
 WebServer server(80);
 
 namespace {
-constexpr uint32_t kBackendPollIntervalMs       = 2000;
+constexpr uint32_t kBackendPollIntervalMs       = 500;
 constexpr float kBackendAutoHoverAltitudeMeters = 0.5f;
+constexpr float kBackendApproachMaxDistanceMeters = 4.0f;
+constexpr uint32_t kBackendApproachTickMs = 200;
+constexpr const char *kBackendApproachCommandPrefix = "CMD_APPROACH_AND_LAND ";
+constexpr float kBackendApproachForwardSpeedMps = 0.45f;
+constexpr float kBackendApproachPreMoveWaitS = 2.0f;
 
 struct BackendCommandState {
     bool sweep_now             = false;
@@ -63,7 +68,89 @@ struct BackendCommandState {
     bool sweep_intervals       = false;
     bool temporary_disable_off = false;
 };
+
+struct BackendApproachController {
+    bool active                = false;
+    float requested_distance_m = 0.0f;
+    String last_command_at;
+};
+
+BackendApproachController g_backend_approach;
+
+// Auto-land timer: set to millis() + delay when a movement command is received.
+static uint32_t g_movement_auto_land_ms    = 0;
+static bool g_movement_auto_land_armed     = false;
+constexpr uint32_t kMovementAutoLandDelayMs = 1000;
 }  // namespace
+
+// -------- action sequence support (must precede callers) --------
+enum class SeqActionType : uint8_t { MOVE, WAIT, ALT, LAND };
+
+struct SeqAction {
+    SeqActionType type;
+    char axis;    // 'x' or 'y' for move
+    int8_t sign;  // +1 or -1 for move
+    float speed_mps;
+    float duration_s;
+    float alt_target;
+};
+
+static SeqAction g_seq[16];
+static uint8_t g_seq_len        = 0;
+static uint8_t g_seq_index      = 0;
+static float g_seq_elapsed      = 0.0f;
+static volatile bool g_seq_live = false;
+
+static void sequence_reset_state() {
+    g_seq_len     = 0;
+    g_seq_index   = 0;
+    g_seq_elapsed = 0.0f;
+    g_seq_live    = false;
+}
+
+static void launch_backend_approach_sequence(float distance_m) {
+    sequence_reset_state();
+
+    const float move_duration_s = distance_m / kBackendApproachForwardSpeedMps;
+
+    g_seq[0].type       = SeqActionType::WAIT;
+    g_seq[0].axis       = 'x';
+    g_seq[0].sign       = 0;
+    g_seq[0].speed_mps  = 0.0f;
+    g_seq[0].duration_s = kBackendApproachPreMoveWaitS;
+    g_seq[0].alt_target = 0.0f;
+
+    g_seq[1].type       = SeqActionType::MOVE;
+    g_seq[1].axis       = 'y';
+    g_seq[1].sign       = -1;
+    g_seq[1].speed_mps  = kBackendApproachForwardSpeedMps;
+    g_seq[1].duration_s = move_duration_s;
+    g_seq[1].alt_target = 0.0f;
+
+    g_seq[2].type       = SeqActionType::LAND;
+    g_seq[2].axis       = 'x';
+    g_seq[2].sign       = 0;
+    g_seq[2].speed_mps  = 0.0f;
+    g_seq[2].duration_s = 0.0f;
+    g_seq[2].alt_target = 0.0f;
+
+    g_seq_len     = 3;
+    g_seq_index   = 0;
+    g_seq_elapsed = 0.0f;
+    g_seq_live    = true;
+
+    reset_position_state();
+    auto_takeoff_and_hover(kBackendAutoHoverAltitudeMeters);
+    Stick[CONTROLMODE]    = ANGLECONTROL;
+    Stick[ALTCONTROLMODE] = AUTO_ALT;
+    PositionHold_flag     = 0;
+    ahrs_reset_flag       = 0;
+}
+
+static bool backend_approach_sequence_live() {
+    return g_seq_live;
+}
+// -------- end sequence support --------
 
 // webserver task to handle http requests independently
 static void webserver_task(void *param) {
@@ -75,7 +162,8 @@ static void webserver_task(void *param) {
 }
 
 // org_id from drone_org_registry_map, -1 = not yet fetched
-static int8_t g_org_id = -1;
+// Default to 1 so Supabase polling works immediately even without a registry entry.
+static int8_t g_org_id = 1;
 static volatile uint8_t g_backend_sweep_now = 0;
 static volatile uint8_t g_backend_force_scan = 0;
 static volatile uint8_t g_backend_sweep_intervals = 0;
@@ -106,6 +194,19 @@ static int supabase_get_json(const char *url, String &body) {
     body     = http.getString();
     http.end();
     return code;
+}
+
+static bool json_field_as_string(const String &body, const char *field_name, String &value) {
+    String token = String("\"") + field_name + "\":\"";
+    int idx      = body.indexOf(token);
+    if (idx < 0) return false;
+
+    idx += token.length();
+    int end = body.indexOf('"', idx);
+    if (end < 0 || end <= idx) return false;
+
+    value = body.substring(idx, end);
+    return true;
 }
 
 static bool json_field_is_true(const String &body, const char *field_name) {
@@ -163,6 +264,7 @@ static void apply_backend_command_state(const BackendCommandState &state) {
         // keep the disable request dominant over any concurrent scan/takeoff command
         sequence_stop();
         PositionHold_flag = 0;
+        g_backend_approach.active = false;
     }
 
     if (!disable_request && takeoff_request && !last_takeoff_request) {
@@ -181,6 +283,57 @@ static void apply_backend_command_state(const BackendCommandState &state) {
 
     last_takeoff_request = takeoff_request;
     last_disable_request = disable_request;
+}
+
+static bool fetch_latest_backend_approach_command(int8_t org_id, String &occurred_at, float &distance_m, String &body,
+                                                  int &code) {
+    char url_buf[384];
+    snprintf(url_buf, sizeof(url_buf),
+             "https://" SUPABASE_PROJECT_ID
+             ".supabase.co/rest/v1/activity_feed?select=title,occurred_at&org_id=eq.%d&title=like.%s*&order=occurred_at.desc&limit=1",
+             (int)org_id, kBackendApproachCommandPrefix);
+
+    code = supabase_get_json(url_buf, body);
+    if (code != 200 || body.length() == 0 || body == "[]") return false;
+
+    String title;
+    if (!json_field_as_string(body, "title", title)) return false;
+    if (!title.startsWith(kBackendApproachCommandPrefix)) return false;
+    if (!json_field_as_string(body, "occurred_at", occurred_at)) return false;
+
+    distance_m = title.substring(strlen(kBackendApproachCommandPrefix)).toFloat();
+    if (distance_m <= 0.0f) return false;
+
+    if (distance_m > kBackendApproachMaxDistanceMeters) distance_m = kBackendApproachMaxDistanceMeters;
+    return true;
+}
+
+static void start_backend_approach_command(float distance_m, const String &occurred_at) {
+    g_backend_approach.active               = true;
+    g_backend_approach.requested_distance_m = distance_m;
+    g_backend_approach.last_command_at      = occurred_at;
+    launch_backend_approach_sequence(distance_m);
+
+    serial_logger_usb_print("backend: queued approach command distance=");
+    serial_logger_usb_print(String(distance_m, 2));
+    serial_logger_usb_print(" at ");
+    serial_logger_usb_println(occurred_at);
+}
+
+static void tick_backend_approach_command() {
+    if (!g_backend_approach.active) return;
+
+    if (!backend_approach_sequence_live() && Mode != AUTO_LANDING_MODE) {
+        serial_logger_usb_println("backend: approach sequence completed");
+        g_backend_approach.active = false;
+    }
+}
+
+static void backend_approach_task(void *param) {
+    for (;;) {
+        tick_backend_approach_command();
+        vTaskDelay(pdMS_TO_TICKS(kBackendApproachTickMs));
+    }
 }
 
 static bool fetch_backend_command_state_from_table(const char *table_name, const char *select_clause,
@@ -355,9 +508,22 @@ static void supabase_registry_task(void *param) {
         }
 
         // poll backend command state every 2s
-        vTaskDelay(pdMS_TO_TICKS(kBackendPollIntervalMs - 1000));
+        vTaskDelay(pdMS_TO_TICKS(kBackendPollIntervalMs));
         if (WiFi.status() != WL_CONNECTED) continue;
 
+        // poll approach command FIRST (fast path — this is the critical flight trigger)
+        String command_occurred_at;
+        String command_body;
+        float command_distance_m = 0.0f;
+        int command_code = 0;
+        if (fetch_latest_backend_approach_command(g_org_id, command_occurred_at, command_distance_m, command_body,
+                                                  command_code)) {
+            if (command_occurred_at != g_backend_approach.last_command_at) {
+                start_backend_approach_command(command_distance_m, command_occurred_at);
+            }
+        }
+
+        // then poll backend command state (lower priority — force_scan / sweep flags)
         BackendCommandState state;
         String body;
         int code = 0;
@@ -910,6 +1076,10 @@ void handle_movement() {
     PositionHold_flag  = 1;     // enable position controller
     ahrs_reset_flag    = 0;
 
+    // Arm auto-land timer — will trigger 1.5 s after this movement command.
+    g_movement_auto_land_ms  = millis() + kMovementAutoLandDelayMs;
+    g_movement_auto_land_armed = true;
+
     // Debug: log the move request
     print("MOVE CMD: dir=%s step=%.2f m | target: (%.3f, %.3f) -> (%.3f, %.3f) | current: (%.3f, %.3f)\r\n",
           dir.c_str(), step, old_tx, old_ty, target_x, target_y, current_x, current_y);
@@ -963,6 +1133,19 @@ void handle_logs() {
 void handle_ping() {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "text/plain", "pong");
+}
+
+void handle_fly() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    String dist_str = server.arg("distance");
+    if (dist_str.length() == 0) dist_str = server.arg("d");
+    float distance_m = dist_str.toFloat();
+    if (distance_m <= 0.0f) distance_m = 2.5f;
+    if (distance_m > kBackendApproachMaxDistanceMeters) distance_m = kBackendApproachMaxDistanceMeters;
+    serial_logger_usb_print("[fly] distance=");
+    serial_logger_usb_println(String(distance_m, 2));
+    launch_backend_approach_sequence(distance_m);
+    server.send(200, "text/plain", "OK");
 }
 
 void handle_reset_position() {
@@ -1046,31 +1229,7 @@ static void handle_pos_gains_set() {
     server.send(200, "application/json", buf);
 }
 
-// -------- action sequence support --------
-enum class SeqActionType : uint8_t { MOVE, WAIT, ALT, LAND };
-
-struct SeqAction {
-    SeqActionType type;
-    char axis;    // 'x' or 'y' for move
-    int8_t sign;  // +1 or -1 for move
-    float speed_mps;
-    float duration_s;
-    float alt_target;
-};
-
-static SeqAction g_seq[16];
-static uint8_t g_seq_len        = 0;
-static uint8_t g_seq_index      = 0;
-static float g_seq_elapsed      = 0.0f;
-static volatile bool g_seq_live = false;
-
-static void sequence_reset_state() {
-    g_seq_len     = 0;
-    g_seq_index   = 0;
-    g_seq_elapsed = 0.0f;
-    g_seq_live    = false;
-}
-
+// -------- parse_action_token --------
 static bool parse_action_token(const String &token, SeqAction &out) {
     String t = token;
     t.trim();
@@ -1237,6 +1396,14 @@ void sequence_stop(void) {
 }
 
 void sequence_tick(float dt_sec) {
+    // Check movement auto-land timer.
+    if (g_movement_auto_land_armed && millis() >= g_movement_auto_land_ms) {
+        g_movement_auto_land_armed = false;
+        if (Mode == FLIGHT_MODE) {
+            print("movement auto-land triggered\r\n");
+            request_mode_change(AUTO_LANDING_MODE);
+        }
+    }
     if (!g_seq_live || g_seq_len == 0) return;
     if (dt_sec <= 0.0f) return;
     if (Mode != FLIGHT_MODE && Mode != AUTO_LANDING_MODE && Mode != PARKING_MODE) return;
@@ -1364,6 +1531,8 @@ void rc_init(void) {
     server.on("/telemetry", HTTP_GET, handle_telemetry);
     server.on("/logs", HTTP_GET, handle_logs);
     server.on("/ping", HTTP_GET, handle_ping);
+    server.on("/fly", HTTP_GET, handle_fly);
+    server.on("/fly", HTTP_OPTIONS, handle_options);
     server.on("/reset/position", HTTP_GET, handle_reset_position);
     server.on("/target", HTTP_GET, handle_target_get);
     server.on("/target", HTTP_POST, handle_target_set);
@@ -1461,6 +1630,7 @@ void rc_init(void) {
     xTaskCreatePinnedToCore(webserver_task, "webserver", 8192, nullptr, 1, nullptr, 1);
 
     xTaskCreatePinnedToCore(supabase_registry_task, "supabase_registry", 8192, nullptr, 0, nullptr, 1);
+    xTaskCreatePinnedToCore(backend_approach_task, "backend_approach", 4096, nullptr, 0, nullptr, 1);
 
     // // start the separate camera server on port 81 so webserver never blocks
     start_camera_stream_server();

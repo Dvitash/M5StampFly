@@ -76,7 +76,7 @@ constexpr bool kMotorSwapFlRrOutputs = false;
 
 // idle floor: escs never see 0% while stabilizing (avoids sync loss; all four spin at least this)
 constexpr float MOTOR_MIN_DUTY = 0.05f;
-constexpr float MOTOR_MAX_DUTY = 0.98f;
+constexpr float MOTOR_MAX_DUTY = 1.00f;
 
 static float clamp_motor_raw_duty(float d) {
     if (d < MOTOR_MIN_DUTY) return MOTOR_MIN_DUTY;
@@ -131,13 +131,13 @@ const float z_dot_ti  = 1.00f;
 const float z_dot_td  = 0.06f;
 const float z_dot_eta = 0.125f;
 
-const float Hover_trim_scale            = 1.10f;
-const float Payload_hover_boost_duty    = 0.10f;
-const float Thrust0_adapt_gain          = 0.14f;
-const float Thrust0_adapt_margin        = 0.30f;
-const float Altitude_thrust_window_up   = 1.20f;
+const float Hover_trim_scale            = 0.5f;
+const float Payload_hover_boost_duty    = 0.30f;
+const float Thrust0_adapt_gain          = 0.20f;
+const float Thrust0_adapt_margin        = 0.70f;
+const float Altitude_thrust_window_up   = 1.60f;
 const float Altitude_thrust_window_down = 0.80f;
-const float Auto_takeoff_boost_duty     = 0.08f;
+const float Auto_takeoff_boost_duty     = 0.25f;
 
 const float Duty_bias_up   = 1.581f;  // Altitude Control parameter　Itolab 1.589 M5Stack 1.581
 const float Duty_bias_down = 1.578f;  // Auto landing  parameter Itolab 1.578 M5Stack 1.578
@@ -558,7 +558,7 @@ float get_trim_duty(float voltage) {
     // Keep this as a conservative baseline; Thrust0 is auto-trimmed in flight.
     float duty = (-0.2448f * voltage + 1.5892f) * Hover_trim_scale + Payload_hover_boost_duty;
     if (duty < 0.0f) duty = 0.0f;
-    if (duty > 0.95f) duty = 0.95f;
+    if (duty > 1.00f) duty = 1.00f;
     return duty;
 }
 
@@ -611,13 +611,12 @@ void get_command(void) {
         Alt_flag                = 1;
         float target_hover_duty = get_trim_duty(Voltage);
 
-        if (Auto_takeoff_counter < 500) {
-            Thrust0 = (float)Auto_takeoff_counter / 1000.0;
-            if (Thrust0 > get_trim_duty(3.8)) Thrust0 = get_trim_duty(3.8);
+        if (Auto_takeoff_counter < 200) {
+            // Jump straight to full hover duty — no slow ramp on the floor.
+            Thrust0 = target_hover_duty;
             Auto_takeoff_counter++;
         } else if (Auto_takeoff_counter < 1000) {
-            Thrust0 = (float)Auto_takeoff_counter / 1000.0;
-            if (Thrust0 > target_hover_duty) Thrust0 = target_hover_duty;
+            Thrust0 = target_hover_duty;
             Auto_takeoff_counter++;
         } else if (Auto_takeoff_counter == 1000) {
             Thrust0 = target_hover_duty;
@@ -1087,6 +1086,26 @@ void angle_control(void) {
             if (Roll_angle_reference < -(30.0f * PI / 180.0f)) Roll_angle_reference = -30.0f * PI / 180.0f;
             if (Pitch_angle_reference > (30.0f * PI / 180.0f)) Pitch_angle_reference = 30.0f * PI / 180.0f;
             if (Pitch_angle_reference < -(30.0f * PI / 180.0f)) Pitch_angle_reference = -30.0f * PI / 180.0f;
+
+            // Gate pitch/roll until the drone has cleared the ground.
+            // Below kHoverGateAlt: commands are zeroed (hover-first behaviour).
+            // Between kHoverGateAlt and kPitchFadeTopAlt: fade linearly to full authority.
+            {
+                constexpr float kHoverGateAlt    = 0.25f;  // must reach this altitude before any tilt allowed
+                constexpr float kPitchFadeTopAlt = 0.50f;  // full authority restored by this altitude
+                constexpr float kFullPitchRad    = 30.0f * PI / 180.0f;
+                if (Altitude2 < kHoverGateAlt) {
+                    Roll_angle_reference  = 0.0f;
+                    Pitch_angle_reference = 0.0f;
+                } else if (Altitude2 < kPitchFadeTopAlt) {
+                    float t     = (Altitude2 - kHoverGateAlt) / (kPitchFadeTopAlt - kHoverGateAlt);
+                    float limit = t * kFullPitchRad;
+                    if (Roll_angle_reference > limit) Roll_angle_reference = limit;
+                    if (Roll_angle_reference < -limit) Roll_angle_reference = -limit;
+                    if (Pitch_angle_reference > limit) Pitch_angle_reference = limit;
+                    if (Pitch_angle_reference < -limit) Pitch_angle_reference = -limit;
+                }
+            }
 
             // Error
             phi_err   = Roll_angle_reference - (Roll_angle - Roll_angle_offset);
